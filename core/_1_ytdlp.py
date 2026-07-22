@@ -28,6 +28,7 @@ def update_ytdlp():
     from yt_dlp import YoutubeDL
     return YoutubeDL
 
+
 def download_video_ytdlp(url, save_path='output', resolution='1080'):
     os.makedirs(save_path, exist_ok=True)
     ydl_opts = {
@@ -37,6 +38,8 @@ def download_video_ytdlp(url, save_path='output', resolution='1080'):
         'writethumbnail': True,
         'merge_output_format': 'mp4',
         'postprocessors': [{'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'}],
+        # 修复：正确启用远程组件来解决 YouTube n-challenge
+        'remote_components': ['ejs:github'],
     }
 
     # Read Youtube Cookie File
