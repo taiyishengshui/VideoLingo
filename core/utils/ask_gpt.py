@@ -65,6 +65,7 @@ def ask_gpt(prompt, resp_type=None, valid_def=None, log_title="default"):
         return cached
 
     model = load_key("api.model")
+    thinking_type = load_key("api.thinking_type") # 获取 'disabled' 或 'enabled'
     base_url = load_key("api.base_url")
     if 'ark' in base_url:
         base_url = "https://ark.cn-beijing.volces.com/api/v3"
@@ -81,8 +82,15 @@ def ask_gpt(prompt, resp_type=None, valid_def=None, log_title="default"):
         model=model,
         messages=[{"role": "user", "content": effective_prompt}],
         response_format=response_format,
+        temperature=0.4,
         timeout=300
     )
+    if thinking_type:
+        params["extra_body"] = {
+            "thinking": {
+                "type": thinking_type
+            }
+        }
     resp_raw = client.chat.completions.create(**params)
 
     if resp_raw is None:
