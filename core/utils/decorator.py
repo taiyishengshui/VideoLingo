@@ -3,11 +3,15 @@ import time
 import os
 from rich import print as rprint
 
+# Sentinel that distinguishes "default_return not provided" from any
+# user-provided value (including None, 0, "", False).
+_DEFAULT_NOT_SET = object()
+
 # ------------------------------
 # retry decorator
 # ------------------------------
 
-def except_handler(error_msg, retry=0, delay=1, default_return=None):
+def except_handler(error_msg, retry=0, delay=1, default_return=_DEFAULT_NOT_SET):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -19,7 +23,7 @@ def except_handler(error_msg, retry=0, delay=1, default_return=None):
                     last_exception = e
                     rprint(f"[red]{error_msg}: {e}, retry: {i+1}/{retry}[/red]")
                     if i == retry:
-                        if default_return is not None:
+                        if default_return is not _DEFAULT_NOT_SET:
                             return default_return
                         raise last_exception
                     time.sleep(delay * (2**i))

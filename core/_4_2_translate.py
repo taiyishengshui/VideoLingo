@@ -101,8 +101,8 @@ def translate_all():
         trans_text.extend(best_match[0][2].split('\n'))
     
     # Trim long translation text
-    df_text = pd.read_excel(_2_CLEANED_CHUNKS)
-    df_text['text'] = df_text['text'].str.strip('"').str.strip()
+    from core.utils.words_store import load_words
+    df_text = load_words(xlsx_path=_2_CLEANED_CHUNKS)  # JSON primary, xlsx fallback; already unquoted
     df_translate = pd.DataFrame({'Source': src_text, 'Translation': trans_text})
     subtitle_output_configs = [('trans_subs_for_audio.srt', ['Translation'])]
     df_time = align_timestamp(df_text, df_translate, subtitle_output_configs, output_dir=None, for_display=False)

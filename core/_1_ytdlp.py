@@ -7,6 +7,7 @@ from core.utils import *
 
 OUTPUT_DIR = "output"
 INPUT_MANIFEST = "input_manifest.json"
+# Files VideoLingo generates itself — never treat them as user input.
 GENERATED_AUDIO_NAMES = {"dub.mp3", "normalized_dub.wav"}
 
 def sanitize_filename(filename):
@@ -24,7 +25,7 @@ def update_ytdlp():
             del sys.modules['yt_dlp']
         rprint("[green]yt-dlp updated[/green]")
     except subprocess.CalledProcessError as e:
-        rprint("[yellow]Warning: Failed to update yt-dlp: {e}[/yellow]")
+        rprint(f"[yellow]Warning: Failed to update yt-dlp: {e}[/yellow]")
     from yt_dlp import YoutubeDL
     return YoutubeDL
 
@@ -86,7 +87,13 @@ def find_video_files(save_path='output'):
     # change \\ to /, this happen on windows
     if sys.platform.startswith('win'):
         video_files = [file.replace("\\", "/") for file in video_files]
-    video_files = [file for file in video_files if not file.startswith("output/output")]
+    # Only exclude VideoLingo's own generated outputs — matching by prefix
+    # ("output/output") would wrongly reject user files named like
+    # "output_extra.mp4". Compare basenames instead.
+    generated_video_names = {"output_sub.mp4", "output_dub.mp4"}
+    video_files = [file for file in video_files
+                   if os.path.basename(file) not in generated_video_names
+                   and not file.startswith("output/output")]
     if len(video_files) != 1:
         raise ValueError(f"Number of videos found {len(video_files)} is not unique. Please check.")
     return video_files[0]

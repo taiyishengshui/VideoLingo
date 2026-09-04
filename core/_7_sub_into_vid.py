@@ -64,8 +64,14 @@ def merge_subtitles_to_video():
         return
 
     if not os.path.exists(SRC_SRT) or not os.path.exists(TRANS_SRT):
-        rprint("Subtitle files not found in the 'output' directory.")
-        exit(1)
+        # Do NOT call exit() here: this function runs inside the Streamlit
+        # TaskRunner's background thread, where SystemExit would kill the
+        # thread silently and leave the runner stuck in "running" state.
+        # Raising a normal exception lets TaskRunner surface it as an error.
+        raise FileNotFoundError(
+            f"Subtitle files not found in the 'output' directory: "
+            f"missing {[p for p in (SRC_SRT, TRANS_SRT) if not os.path.exists(p)]}"
+        )
 
     video = cv2.VideoCapture(video_file)
     TARGET_WIDTH = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))

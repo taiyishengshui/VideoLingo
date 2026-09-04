@@ -8,13 +8,14 @@ from rich import print as rprint
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 def split_by_mark(nlp):
+    from core.utils.words_store import load_words
     whisper_language = load_key("whisper.language")
     language = load_key("whisper.detected_language") if whisper_language == 'auto' else whisper_language # consider force english case
     joiner = get_joiner(language)
     rprint(f"[blue]🔍 Using {language} language joiner: '{joiner}'[/blue]")
-    chunks = pd.read_excel("output/log/cleaned_chunks.xlsx")
-    chunks.text = chunks.text.apply(lambda x: x.strip('"').strip(""))
-    
+    # JSON primary store, xlsx legacy fallback; text arrives unquoted either way
+    chunks = load_words(xlsx_path="output/log/cleaned_chunks.xlsx")
+
     # join with joiner
     input_text = joiner.join(chunks.text.to_list())
 

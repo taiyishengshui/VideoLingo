@@ -55,6 +55,29 @@ def _strip_markdown_json(text: str) -> str:
 
 
 
+def _sanitize_proxy_env():
+    """Strip leading/trailing whitespace (and quotes) from proxy env vars.
+
+    A malformed value like " http://127.0.0.1:7890" (note the leading space,
+    URL-encoded as %20 in httpx's error) makes httpx fail every request with
+    "Unknown scheme for proxy URL" — retries can't help. Windows users often
+    pick up such values from system environment variable settings. Fixing
+    them in-process is safe: httpx only reads these at client construction.
+    """
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                "ALL_PROXY", "all_proxy"):
+        val = os.environ.get(key)
+        if not val:
+            continue
+        cleaned = val.strip().strip('"').strip("'").split()[0] if val.strip() else ""
+        if cleaned and cleaned != val:
+            rprint(f"[yellow]⚠️ Proxy env {key} had stray whitespace/quotes — cleaned.[/yellow]")
+            os.environ[key] = cleaned
+        elif not cleaned:
+            # value was only whitespace → drop it so httpx ignores it entirely
+            del os.environ[key]
+
+
 @except_handler("GPT request failed", retry=5)
 def ask_gpt(prompt, resp_type=None, valid_def=None, log_title="default"):
     if not load_key("api.key"):
@@ -64,6 +87,7 @@ def ask_gpt(prompt, resp_type=None, valid_def=None, log_title="default"):
         rprint("use cache response")
         return cached
 
+    _sanitize_proxy_env()
     model = load_key("api.model")
     thinking_type = load_key("api.thinking_type") # 获取 'disabled' 或 'enabled'
     base_url = load_key("api.base_url")

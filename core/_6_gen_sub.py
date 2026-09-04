@@ -148,8 +148,8 @@ def clean_translation(x):
     return autocorrect.format(cleaned)
 
 def align_timestamp_main():
-    df_text = pd.read_excel(_2_CLEANED_CHUNKS)
-    df_text['text'] = df_text['text'].str.strip('"').str.strip()
+    from core.utils.words_store import load_words
+    df_text = load_words(xlsx_path=_2_CLEANED_CHUNKS)  # JSON primary, xlsx fallback; already unquoted
     df_translate = pd.read_excel(_5_SPLIT_SUB)
     df_translate['Translation'] = df_translate['Translation'].apply(clean_translation)
     

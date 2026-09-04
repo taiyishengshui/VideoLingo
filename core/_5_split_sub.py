@@ -33,15 +33,19 @@ def calc_len(text: str) -> float:
 def align_subs(src_sub: str, tr_sub: str, src_part: str) -> Tuple[List[str], List[str], str]:
     align_prompt = get_align_prompt(src_sub, tr_sub, src_part)
     
+    src_parts = src_part.split('\n')
+    
     def valid_align(response_data):
         if 'align' not in response_data:
             return {"status": "error", "message": "Missing required key: `align`"}
-        if len(response_data['align']) < 2:
-            return {"status": "error", "message": "Align does not contain more than 1 part as expected!"}
+        if len(response_data['align']) != len(src_parts):
+            return {"status": "error", "message": f"Align returned {len(response_data['align'])} parts, expected {len(src_parts)}"}
+        for i, item in enumerate(response_data['align']):
+            if f'target_part_{i+1}' not in item:
+                return {"status": "error", "message": f"Missing `target_part_{i+1}` in align item {i}"}
         return {"status": "success", "message": "Align completed"}
     parsed = ask_gpt(align_prompt, resp_type='json', valid_def=valid_align, log_title='align_subs')
     align_data = parsed['align']
-    src_parts = src_part.split('\n')
     tr_parts = [item[f'target_part_{i+1}'].strip() for i, item in enumerate(align_data)]
     
     whisper_language = load_key("whisper.language")
@@ -83,9 +87,24 @@ def split_align_subs(src_lines: List[str], tr_lines: List[str]):
         src_lines[i] = src_parts
         tr_lines[i] = tr_parts
         remerged_tr_lines[i] = tr_remerged
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=load_key("max_workers")) as executor:
-        executor.map(process, to_split)
+
+    if to_split:
+        # NOTE: executor.map() is lazy — its result iterator MUST be consumed
+        # for the work to actually run. Previously the return value was
+        # discarded, so no splitting ever happened. Use explicit futures and
+        # consume every result (and every raised exception) instead.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=load_key("max_workers")) as executor:
+            futures = {executor.submit(process, i): i for i in to_split}
+            for future in concurrent.futures.as_completed(futures):
+                i = futures[future]
+                try:
+                    exc = future.exception()
+                except concurrent.futures.CancelledError:
+                    exc = concurrent.futures.CancelledError(f"line {i} cancelled")
+                if exc is not None:
+                    console.print(f"[yellow]⚠️ Split of line {i} failed after retries, keeping original line:[/yellow]")
+                    console.print(f"[yellow]  {exc}[/yellow]")
+                    # Leave this line unsplit; flatten handles plain strings.
     
     # Flatten `src_lines` and `tr_lines`
     src_lines = [item for sublist in src_lines for item in (sublist if isinstance(sublist, list) else [sublist])]

@@ -34,7 +34,7 @@ def convert_video_to_audio(video_file: str):
         if _ffmpeg_has_encoder('libmp3lame'):
             cmd = [
                 'ffmpeg', '-y', '-i', video_file, '-vn',
-                '-c:a', 'libmp3lame', '-b:a', '32k',
+                '-c:a', 'libmp3lame', '-b:a', '64k',
                 '-ar', '16000', '-ac', '1',
                 '-metadata', 'encoding=UTF-8', _RAW_AUDIO_FILE
             ]
@@ -59,7 +59,7 @@ def prepare_audio_for_asr(audio_file: str):
         if _ffmpeg_has_encoder('libmp3lame'):
             cmd = [
                 'ffmpeg', '-y', '-i', audio_file, '-vn',
-                '-c:a', 'libmp3lame', '-b:a', '32k',
+                '-c:a', 'libmp3lame', '-b:a', '64k',
                 '-ar', '16000', '-ac', '1',
                 '-metadata', 'encoding=UTF-8', _RAW_AUDIO_FILE
             ]
@@ -90,39 +90,74 @@ def get_audio_duration(audio_file: str) -> float:
     return duration
 
 def split_audio(audio_file: str, target_len: float = 30*60, win: float = 60) -> List[Tuple[float, float]]:
-    ## 在 [target_len-win, target_len+win] 区间内用 pydub 检测静默，切分音频
+    """Split long audio into chunks of ~target_len seconds, cutting ONLY in silence.
+
+    target_len is a reference, not a hard boundary. For each nominal cut
+    point we search for a silent gap and cut at its CENTER, so no spoken
+    words are lost at chunk boundaries. The search window widens
+    progressively (±win → ±180s → ±600s → rest of audio) until a suitable
+    gap is found. As a last resort — no detectable silence at all in the
+    remaining audio — we cut at the quietest 100ms window around the target
+    instead of blindly at the target timestamp.
+    """
     rprint(f"[blue]🎙️ Starting audio segmentation {audio_file} {target_len} {win}[/blue]")
     audio = AudioSegment.from_file(audio_file)
     duration = float(mediainfo(audio_file)["duration"])
     if duration <= target_len + win:
         return [(0, duration)]
-    segments, pos = [], 0.0
-    safe_margin = 0.5  # 静默点前后安全边界，单位秒
 
+    min_silence_len = 0.5  # a pause >= 0.5s counts as silence
+    min_gap = 1.0          # the cut needs >= 0.5s of quiet on EACH side
+    search_windows = [win, 180, 600, None]  # None = scan everything that's left
+
+    def _silences(a_start, a_end):
+        """Silence regions (absolute seconds) within [a_start, a_end]."""
+        ms_start = int(max(0.0, a_start) * 1000)
+        ms_end = int(min(duration, a_end) * 1000)
+        if ms_end - ms_start < min_gap * 1000:
+            return []
+        regions = detect_silence(audio[ms_start:ms_end],
+                                 min_silence_len=int(min_silence_len * 1000),
+                                 silence_thresh=-30)
+        return [(s / 1000 + ms_start / 1000.0, e / 1000 + ms_start / 1000.0)
+                for s, e in regions]
+
+    def _pick_split_at(threshold, pos):
+        """Find the silent gap nearest to `threshold` and return its center."""
+        for sw in search_windows:
+            a_start = threshold - sw if sw is not None else pos + min_gap
+            a_end = threshold + sw if sw is not None else duration
+            candidates = [
+                (abs((s + e) / 2 - threshold), s, e)
+                for s, e in _silences(a_start, a_end)
+                if (e - s) >= min_gap and s >= pos + min_gap
+            ]
+            if candidates:
+                candidates.sort(key=lambda c: c[0])
+                _, s, e = candidates[0]
+                cut = (s + e) / 2  # center of the gap: max quiet margin on both sides
+                rprint(f"[green]✂️ Cut at {cut:.1f}s (silence {s:.1f}-{e:.1f}s, "
+                       f"{abs(cut - threshold):.1f}s from target {threshold:.0f}s)[/green]")
+                return cut
+        # Last resort: no silence anywhere — cut at the quietest 100ms window
+        # within ±10s of the target (much safer than a blind cut).
+        rprint(f"[yellow]⚠️ No silence found near {threshold:.0f}s; cutting at quietest point[/yellow]")
+        probe_ms = 100
+        best_cut, best_db = threshold, float("inf")
+        for m in range(int((threshold - 10) * 1000), int((threshold + 10) * 1000) - probe_ms, probe_ms):
+            db = audio[m:m + probe_ms].dBFS
+            if db < best_db:
+                best_db, best_cut = db, (m + probe_ms / 2) / 1000.0
+        return best_cut
+
+    segments, pos = [], 0.0
     while pos < duration:
         if duration - pos <= target_len:
-            segments.append((pos, duration)); break
-
-        threshold = pos + target_len
-        ws, we = int((threshold - win) * 1000), int((threshold + win) * 1000)
-        
-        # 获取完整的静默区域
-        silence_regions = detect_silence(audio[ws:we], min_silence_len=int(safe_margin*1000), silence_thresh=-30)
-        silence_regions = [(s/1000 + (threshold - win), e/1000 + (threshold - win)) for s, e in silence_regions]
-        # 筛选长度足够（至少1秒）且位置适合的静默区域
-        valid_regions = [
-            (start, end) for start, end in silence_regions 
-            if (end - start) >= (safe_margin * 2) and threshold <= start + safe_margin <= threshold + win
-        ]
-        
-        if valid_regions:
-            start, end = valid_regions[0]
-            split_at = start + safe_margin  # 在静默区域起始点后0.5秒处切分
-        else:
-            rprint(f"[yellow]⚠️ No valid silence regions found for {audio_file} at {threshold}s, using threshold[/yellow]")
-            split_at = threshold
-            
-        segments.append((pos, split_at)); pos = split_at
+            segments.append((pos, duration))
+            break
+        split_at = _pick_split_at(pos + target_len, pos)
+        segments.append((pos, split_at))
+        pos = split_at
 
     rprint(f"[green]🎙️ Audio split completed {len(segments)} segments[/green]")
     return segments
@@ -193,24 +228,33 @@ def process_transcription(result: Dict) -> pd.DataFrame:
     return pd.DataFrame(all_words)
 
 def save_results(df: pd.DataFrame):
+    import pandas as pd
+    from core.utils.words_store import save_words_json, export_words_xlsx
     os.makedirs('output/log', exist_ok=True)
 
     # Remove rows where 'text' is empty
     initial_rows = len(df)
-    df = df[df['text'].str.len() > 0]
+    df = df[df['text'].str.len() >= 0]  # keep dtype stable for chained ops
+    df = df[df['text'].astype(str).str.strip().str.len() > 0]
     removed_rows = initial_rows - len(df)
     if removed_rows > 0:
         rprint(f"[blue]ℹ️ Removed {removed_rows} row(s) with empty text.[/blue]")
-    
-    # Check for and remove words longer than 20 characters
+
+    # Check for and remove words longer than 30 characters
+    df = df.copy()
+    df['text'] = df['text'].astype(str).str.strip('"').str.strip()
     long_words = df[df['text'].str.len() > 30]
     if not long_words.empty:
         rprint(f"[yellow]⚠️ Warning: Detected {len(long_words)} word(s) longer than 30 characters. These will be removed.[/yellow]")
         df = df[df['text'].str.len() <= 30]
-    
-    df['text'] = df['text'].apply(lambda x: f'"{x}"')
-    df.to_excel(_2_CLEANED_CHUNKS, index=False)
-    rprint(f"[green]📊 Excel file saved to {_2_CLEANED_CHUNKS}[/green]")
+
+    # JSON is the primary store (lossless, machine-friendely; the correction
+    # engine and checkpoint resume both operate on it); xlsx remains as the
+    # human-facing export with the exact same layout as before.
+    words = df.to_dict(orient='records')
+    save_words_json(words)
+    export_words_xlsx(words, _2_CLEANED_CHUNKS)
+    rprint(f"[green]📊 Word store saved to output/log/cleaned_chunks.json (+ xlsx export)[/green]")
 
 def save_language(language: str):
     update_key("whisper.detected_language", language)
