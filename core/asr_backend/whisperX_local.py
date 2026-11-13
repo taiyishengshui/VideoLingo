@@ -1,4 +1,10 @@
 import os
+# Must be set BEFORE torch initialises CUDA: expandable segments let the
+# allocator return/grow blocks instead of fragmenting into slivers. PyTorch
+# itself recommends it when the OOM report shows large reserved-but-unallocated
+# memory. A user-set value always wins.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import gc
 import json
 import warnings
@@ -34,9 +40,14 @@ torch.load = _patched_torch_load
 # =============================================================================
 import whisperx
 from whisperx.audio import SAMPLE_RATE as _WHISPERX_SR
-from rich import print as rprint
+from core.utils.log_hooks import rprint
 from core.utils import *
-MODEL_DIR = load_key("model_dir")
+from core.asr_backend.vad_gap_fill import gap_fill_settings, fill_gaps, prompt_echo
+# model_dir in config.yaml may be relative ('./_model_cache') — anchor it to
+# the PROJECT ROOT, not the cwd: batch jobs run with cwd = per-video workspace.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_model_dir_cfg = str(load_key("model_dir"))
+MODEL_DIR = _model_dir_cfg if os.path.isabs(_model_dir_cfg) else os.path.join(PROJECT_ROOT, _model_dir_cfg)
 
 
 def _hf_cache_dir_for_repo(cache_root, repo_id):
@@ -151,7 +162,13 @@ _ALIGN_CACHE = {}
 #   cpu_fallback:    once CUDA proves unusable (context corruption), ALL
 #       remaining segments run on CPU. Slow, but the run COMPLETES —
 #       checkpoint keeps every finished segment either way.
-_RUN_STATE = {"last_good_batch": None, "cpu_fallback": False}
+#   vad_batch:       pyannote VAD batch size that survived so far. whisperx
+#       hardcodes 32 at build time and it is NOT affected by the whisper
+#       batch_size we pass to model.transcribe — so it needs its own knob.
+#   vad_on_cpu:      VAD has been moved off the GPU (last resort before the
+#       whole run falls back to CPU).
+_RUN_STATE = {"last_good_batch": None, "cpu_fallback": False,
+              "vad_batch": None, "vad_on_cpu": False}
 
 # Errors that mean the CUDA context INSIDE CTranslate2 is corrupted (typically
 # after an OOM inside parallel_for): every subsequent CUDA call on that
@@ -164,6 +181,83 @@ _STICKY_CUDA_ERRORS = (
     "unspecifiedlaunchfailure",
     "devicesideassert",
 )
+
+
+def _vad_batch_size_for(free_mem_gb: float) -> int:
+    """Pick a pyannote VAD batch size that fits the CURRENTLY free VRAM.
+
+    whisperx builds the VAD with pyannote's default batch_size=32, which is far
+    too big when another process holds most of the card (or when the resident
+    whisper model already claimed its share). The VAD LSTM's peak scales with
+    the batch, so this is the knob that actually decides whether VAD OOMs.
+    """
+    if free_mem_gb >= 4.0:
+        return 32
+    if free_mem_gb >= 2.5:
+        return 16
+    if free_mem_gb >= 1.5:
+        return 8
+    if free_mem_gb >= 0.8:
+        return 4
+    return 2
+
+
+def _apply_vad_batch_size(model, batch_size: int) -> bool:
+    """Retune the already-built pyannote VAD to `batch_size`.
+
+    whisperx never exposes this (load_vad_model() hardcodes the default), so we
+    reach into the pipeline: model.vad_model.vad_pipeline._segmentation is the
+    pyannote Inference object, and its `batch_size` is read on every slide()
+    pass — assigning it takes effect immediately, no reload needed.
+    Returns False when the layout is unexpected (different whisperx version),
+    in which case callers should just carry on with the default.
+    """
+    try:
+        inference = getattr(getattr(getattr(model, "vad_model", None),
+                                    "vad_pipeline", None), "_segmentation", None)
+        if inference is None or not hasattr(inference, "batch_size"):
+            return False
+        old = inference.batch_size
+        if old != batch_size:
+            inference.batch_size = batch_size
+            rprint(f"[cyan]🎚️ VAD batch_size:[/cyan] {old} → {batch_size}")
+        _RUN_STATE["vad_batch"] = batch_size
+        return True
+    except Exception as e:
+        rprint(f"[yellow]⚠️ Could not retune VAD batch size: {e}[/yellow]")
+        return False
+
+
+def _vad_to_cpu(model) -> bool:
+    """Move ONLY the VAD off the GPU (last resort before a full CPU fallback).
+
+    VAD is cheap on CPU and whisper is not, so when VRAM is too tight even for
+    VAD batch_size=1 this keeps transcription on CUDA. Rebuilds the pyannote
+    Inference on CPU, preserving whisperx's pre_aggregation_hook.
+    """
+    try:
+        from pyannote.audio.core.inference import Inference
+        pipe = getattr(getattr(model, "vad_model", None), "vad_pipeline", None)
+        old = getattr(pipe, "_segmentation", None)
+        if old is None:
+            return False
+        seg_model = getattr(pipe, "segmentation", None)
+        if not isinstance(seg_model, torch.nn.Module):
+            seg_model = getattr(old, "model", None)
+        if seg_model is None:
+            return False
+        kwargs = {"device": torch.device("cpu"), "batch_size": 8}
+        hook = getattr(old, "pre_aggregation_hook", None)
+        if hook is not None:
+            kwargs["pre_aggregation_hook"] = hook
+        pipe._segmentation = Inference(seg_model, **kwargs)
+        _RUN_STATE["vad_on_cpu"] = True
+        _RUN_STATE["vad_batch"] = None  # no longer a GPU constraint
+        rprint("[yellow]⚠️ VAD moved to CPU (VRAM too tight) — whisper stays on CUDA.[/yellow]")
+        return True
+    except Exception as e:
+        rprint(f"[yellow]⚠️ Could not move VAD to CPU: {e}[/yellow]")
+        return False
 
 
 def _is_sticky_cuda_error(err) -> bool:
@@ -234,6 +328,7 @@ def transcribe_audio(raw_audio_file, vocal_audio_file, start, end, asr_hints=Non
     # (context corruption), don't reload a CUDA model each segment only to
     # throw it away again.
     device = "cuda" if torch.cuda.is_available() and not _RUN_STATE["cpu_fallback"] else "cpu"
+    free_mem = None  # filled in below on CUDA; used by the OOM backoff ladder
     rprint(f"🚀 Starting WhisperX using device: {device} ...")
     
     if device == "cuda":
@@ -275,12 +370,12 @@ def transcribe_audio(raw_audio_file, vocal_audio_file, start, end, asr_hints=Non
 
     vad_options = {"vad_onset": 0.500,"vad_offset": 0.363}
     hints = asr_hints or {}
-    asr_options = {
-        "no_repeat_ngram_size": 3,
-        "beam_size": 8,
-        "initial_prompt": hints.get("initial_prompt") or None,
-        "hotwords": hints.get("hotwords") or None,
-    }
+    from core.services.asr_service import build_asr_options
+    asr_options = build_asr_options(hints)
+    rprint(f"[cyan]ASR解码：beam={asr_options['beam_size']}，"
+           f"重复限制={asr_options['no_repeat_ngram_size']}，"
+           f"领域提示={'开' if asr_options['initial_prompt'] else '关'}，"
+           f"热词={'开' if asr_options['hotwords'] else '关'}[/cyan]")
     whisper_language = None if 'auto' in WHISPER_LANGUAGE else WHISPER_LANGUAGE
     rprint("[bold yellow] You can ignore warning of `Model was trained with torch 1.10.0+cu102, yours is 2.0.0+cu118...`[/bold yellow]")
     model = _get_or_load_model(model_name, device, compute_type, whisper_language,
@@ -308,6 +403,14 @@ def transcribe_audio(raw_audio_file, vocal_audio_file, start, end, asr_hints=Non
         else:
             batch_size = 2
         rprint(f"[cyan]📦 Batch size:[/cyan] {batch_size} (free VRAM {free_mem:.2f} GB)")
+        # The VAD runs INSIDE model.transcribe() with its own batch size (32 by
+        # default, invisible to the `batch_size` argument above) — size it too,
+        # or VAD is the thing that OOMs on a crowded card.
+        _apply_vad_batch_size(model, _RUN_STATE["vad_batch"] or _vad_batch_size_for(free_mem))
+        if free_mem < 0.35 * gpu_mem:
+            rprint(f"[yellow]⚠️ Only {free_mem:.2f} GB of {gpu_mem:.2f} GB VRAM is free — "
+                   f"something else is holding this GPU (a crashed run left behind? "
+                   f"browser hardware acceleration?). Check with: nvidia-smi[/yellow]")
 
     def load_audio_segment(audio_file, start, end):
         # Decode ONLY the [start, end) window via ffmpeg (-ss/-t) instead of
@@ -367,11 +470,14 @@ def transcribe_audio(raw_audio_file, vocal_audio_file, start, end, asr_hints=Non
         try:
             result = model.transcribe(raw_audio_segment, batch_size=bs, print_progress=True)
             break
-        except RuntimeError as e:
+        except (RuntimeError, MemoryError) as e:
+            # MemoryError is what pyannote's VAD raises on CUDA OOM
+            # ("batch_size (32) is probably too large") — catching only
+            # RuntimeError let it sail straight through the whole ladder.
             # sticky FIRST: "invalid device ordinal" and friends do NOT carry
             # "memory", but they mean the engine's CUDA context is poisoned —
             # they must be caught before the OOM check or they'd slip through.
-            if _is_sticky_cuda_error(e):
+            if isinstance(e, RuntimeError) and _is_sticky_cuda_error(e):
                 if engine_reloads >= 1:
                     # one rebuild already failed → CUDA is a lost cause for
                     # this process. Fall back to CPU for this and all later
@@ -391,6 +497,10 @@ def transcribe_audio(raw_audio_file, vocal_audio_file, start, end, asr_hints=Non
                     model = _get_or_load_model(model_name, device, compute_type,
                                                whisper_language, vad_options,
                                                asr_options, force_reload=True)
+                    # A rebuilt engine ships a fresh VAD at the default 32 —
+                    # re-apply whatever batch size actually survived.
+                    _apply_vad_batch_size(
+                        model, _RUN_STATE["vad_batch"] or _vad_batch_size_for(free_mem or 1.0))
                 except Exception as rebuild_err:
                     # rebuild itself failed (VRAM still wedged) → straight to CPU
                     rprint(f"[red]❌ Engine rebuild failed too ({rebuild_err}) — "
@@ -405,16 +515,23 @@ def transcribe_audio(raw_audio_file, vocal_audio_file, start, end, asr_hints=Non
                 rprint(f"[yellow]⚠️ Retrying segment at batch_size={bs} with a fresh engine.[/yellow]")
                 continue
             msg = str(e).lower()
-            was_cuda_oom = "memory" in msg and ("cuda" in msg or torch.cuda.is_available())
+            was_cuda_oom = device == "cuda" and (
+                isinstance(e, MemoryError) or "memory" in msg)
             if not was_cuda_oom:
                 raise
-            # ordinary OOM with healthy context: halve and retry
+            # ordinary OOM with healthy context: halve BOTH knobs and retry.
+            # Halving only the whisper batch is a no-op when the OOM came from
+            # the VAD (its batch size is independent).
             bs_next = max(1, bs // 2)
-            if bs_next == bs:
-                raise
-            rprint(f"[yellow]⚠️ CUDA OOM at batch_size={bs}, retrying with "
-                    f"batch_size={bs_next} (VRAM pressure).[/yellow]")
+            vad_cur = _RUN_STATE["vad_batch"] or 32
+            vad_next = max(1, vad_cur // 2)
             _safe_cuda_cleanup()
+            if bs_next == bs and vad_next == vad_cur and not _vad_to_cpu(model):
+                raise  # both floors reached and VAD can't move off GPU
+            if vad_next != vad_cur:
+                _apply_vad_batch_size(model, vad_next)
+            rprint(f"[yellow]⚠️ CUDA OOM — retrying with whisper batch_size={bs_next}, "
+                    f"VAD batch_size={vad_next} (VRAM pressure).[/yellow]")
             bs = bs_next
             continue
     # Remember the batch size that actually survived: when memory is empty,
@@ -481,11 +598,40 @@ def transcribe_audio(raw_audio_file, vocal_audio_file, start, end, asr_hints=Non
     # align model stays cached too; only transient buffers get cleared
     _safe_cuda_cleanup()
 
+    # -------------------------
+    # 2.5 补回被 VAD 漏掉的语音
+    # -------------------------
+    # pyannote VAD 偶发把整段真实语音判成非语音 → whisper 根本没看到那段音频，
+    # 字幕会整段缺失（实测 68 分钟播客漏 14 处 / 179.6 秒）。这里扫描「有声但
+    # VAD 没覆盖」的空档，绕开 VAD 单独转写，补进结果。失败只警告，不影响已有转写。
+    gf = gap_fill_settings()
+    if gf["enabled"]:
+        try:
+            added = fill_gaps(
+                model=model, segments=result['segments'],
+                raw_audio_segment=raw_audio_segment,
+                vocal_audio_segment=vocal_audio_segment,
+                seg_start=start, sample_rate=_WHISPERX_SR,
+                raw_audio_file=raw_audio_file,
+                model_a=model_a, metadata=metadata, align_device=align_device,
+                batch_size=bs, settings=gf,
+                repair_spans=[s for s in result['segments']
+                              if prompt_echo(s, hints.get("initial_prompt"))])
+            if added:
+                result['segments'].extend(added)
+                result['segments'].sort(key=lambda s: s.get('start', 0.0))
+                rprint(f"[green]🩹 VAD 漏检补转：补回 {len(added)} 段、"
+                       f"{sum(s['end'] - s['start'] for s in added):.1f}s[/green]")
+        except Exception as e:
+            rprint(f"[yellow]⚠️ VAD 漏检补转失败（已有转写不受影响）：{e}[/yellow]")
+
     # Adjust timestamps
     for segment in result['segments']:
         segment['start'] += start
         segment['end'] += start
-        for word in segment['words']:
+        # 补转段可能没有 words（align 失败时仍保留文本）—— 不能让它崩掉
+        # 整批结果，已转好的部分必须活下来
+        for word in segment.get('words') or []:
             if 'start' in word:
                 word['start'] += start
             if 'end' in word:

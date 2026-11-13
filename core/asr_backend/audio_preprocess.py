@@ -4,10 +4,11 @@ from typing import Dict, List, Tuple
 from pydub import AudioSegment
 from core.utils import *
 from core.utils.models import *
+from core.utils.subprocess_log import run_logged
 from pydub import AudioSegment
 from pydub.silence import detect_silence
 from pydub.utils import mediainfo
-from rich import print as rprint
+from core.utils.log_hooks import rprint
 
 def _ffmpeg_has_encoder(encoder_name: str) -> bool:
     """Check if the current ffmpeg installation supports a given audio encoder."""
@@ -49,7 +50,8 @@ def convert_video_to_audio(video_file: str):
                 '-c:a', 'pcm_s16le', '-ar', '16000', '-ac', '1',
                 '-f', 'wav', _RAW_AUDIO_FILE
             ]
-        subprocess.run(cmd, check=True, stderr=subprocess.PIPE)
+        # run_logged：ffmpeg 报错原本被 PIPE 吞掉，只抛一个空异常，查不出原因
+        run_logged(cmd, check=True)
         rprint(f"[green]🎬➡️🎵 Converted <{video_file}> to <{_RAW_AUDIO_FILE}> with FFmpeg\n[/green]")
 
 def prepare_audio_for_asr(audio_file: str):
@@ -70,7 +72,7 @@ def prepare_audio_for_asr(audio_file: str):
                 '-c:a', 'pcm_s16le', '-ar', '16000', '-ac', '1',
                 '-f', 'wav', _RAW_AUDIO_FILE
             ]
-        subprocess.run(cmd, check=True, stderr=subprocess.PIPE)
+        run_logged(cmd, check=True)
         rprint(f"[green]🎵 Prepared <{audio_file}> as <{_RAW_AUDIO_FILE}>\n[/green]")
 
 def get_audio_duration(audio_file: str) -> float:
@@ -187,10 +189,16 @@ def process_transcription(result: Dict) -> pd.DataFrame:
             if len(word["word"]) > 30:
                 rprint(f"[yellow]⚠️ Warning: Detected word longer than 30 characters, skipping: {word['word']}[/yellow]")
                 continue
-                
+
             # ! For French, we need to convert guillemets to empty strings
             word["word"] = word["word"].replace('»', '').replace('«', '')
-            
+
+            # ASR confidence (0-1) from whisperx alignment — carried through so
+            # the correction engine (asr_correct L2) can target low-score
+            # words. Missing for some backends → None, downstream treats as
+            # "unknown", never hand-picked for LLM review.
+            word_score = word.get('score')
+
             if 'start' not in word and 'end' not in word:
                 if all_words:
                     # Assign the end time of the previous word as the start and end time of the current word
@@ -198,7 +206,8 @@ def process_transcription(result: Dict) -> pd.DataFrame:
                         'text': word["word"],
                         'start': all_words[-1]['end'],
                         'end': all_words[-1]['end'],
-                        'speaker_id': speaker_id
+                        'speaker_id': speaker_id,
+                        'score': word_score
                     }
                     all_words.append(word_dict)
                 else:
@@ -209,7 +218,8 @@ def process_transcription(result: Dict) -> pd.DataFrame:
                             'text': word["word"],
                             'start': next_word["start"],
                             'end': next_word["end"],
-                            'speaker_id': speaker_id
+                            'speaker_id': speaker_id,
+                            'score': word_score
                         }
                         all_words.append(word_dict)
                     else:
@@ -220,9 +230,10 @@ def process_transcription(result: Dict) -> pd.DataFrame:
                     'text': f'{word["word"]}',
                     'start': word.get('start', all_words[-1]['end'] if all_words else 0),
                     'end': word['end'],
-                    'speaker_id': speaker_id
+                    'speaker_id': speaker_id,
+                    'score': word_score
                 }
-                
+
                 all_words.append(word_dict)
     
     return pd.DataFrame(all_words)

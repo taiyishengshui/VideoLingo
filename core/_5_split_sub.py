@@ -1,8 +1,9 @@
 import pandas as pd
+import math
 from typing import List, Tuple
 import concurrent.futures
 
-from core._3_2_split_meaning import split_sentence
+from core.utils.sentence_split import split_sentence
 from core.prompts import get_align_prompt
 from rich.panel import Panel
 from rich.console import Console
@@ -30,23 +31,33 @@ def calc_len(text: str) -> float:
 
     return sum(char_weight(char) for char in text)
 
+def get_target_parts(response_data, num_parts):
+    """Require exactly one nonempty translated string for every source part."""
+    aligned = response_data.get('align') if isinstance(response_data, dict) else None
+    if not isinstance(aligned, list) or len(aligned) != num_parts:
+        return None
+    parts = []
+    for i, item in enumerate(aligned):
+        part = item.get(f'target_part_{i+1}') if isinstance(item, dict) else None
+        if not isinstance(part, str) or not part.strip():
+            return None
+        parts.append(part.strip())
+    return parts
+
+
 def align_subs(src_sub: str, tr_sub: str, src_part: str) -> Tuple[List[str], List[str], str]:
     align_prompt = get_align_prompt(src_sub, tr_sub, src_part)
     
     src_parts = src_part.split('\n')
     
     def valid_align(response_data):
-        if 'align' not in response_data:
-            return {"status": "error", "message": "Missing required key: `align`"}
-        if len(response_data['align']) != len(src_parts):
-            return {"status": "error", "message": f"Align returned {len(response_data['align'])} parts, expected {len(src_parts)}"}
-        for i, item in enumerate(response_data['align']):
-            if f'target_part_{i+1}' not in item:
-                return {"status": "error", "message": f"Missing `target_part_{i+1}` in align item {i}"}
+        if get_target_parts(response_data, len(src_parts)) is None:
+            return {"status": "error", "message": f"Expected {len(src_parts)} nonempty target parts"}
         return {"status": "success", "message": "Align completed"}
     parsed = ask_gpt(align_prompt, resp_type='json', valid_def=valid_align, log_title='align_subs')
-    align_data = parsed['align']
-    tr_parts = [item[f'target_part_{i+1}'].strip() for i, item in enumerate(align_data)]
+    tr_parts = get_target_parts(parsed, len(src_parts))
+    if tr_parts is None:
+        raise ValueError("Subtitle alignment contains empty or mismatched target parts")
     
     whisper_language = load_key("whisper.language")
     language = load_key("whisper.detected_language") if whisper_language == 'auto' else whisper_language
@@ -82,8 +93,23 @@ def split_align_subs(src_lines: List[str], tr_lines: List[str]):
     
     @except_handler("Error in split_align_subs")
     def process(i):
-        split_src = split_sentence(src_lines[i], num_parts=2).strip()
-        src_parts, tr_parts, tr_remerged = align_subs(src_lines[i], tr_lines[i], split_src)
+        # 2026-09-08: num_parts is now derived from how much the line exceeds
+        # the subtitle budget (both sides), instead of a fixed 2. Pre-translation
+        # splitting was relaxed so complete sentences reach the translator; this
+        # step is now the one place where shortening happens, and it must be
+        # able to cut a long line into as many parts as needed in one pass.
+        src, tr = str(src_lines[i]), str(tr_lines[i])
+        overflow = max(len(src), calc_len(tr) * TARGET_SUB_MULTIPLIER)
+        n_parts = max(2, math.ceil(overflow / MAX_SUB_LENGTH))
+        word_budget = max(3, math.ceil(len(src.split()) / n_parts))
+        split_src = split_sentence(src, num_parts=n_parts, word_limit=word_budget).strip()
+        source_parts = [part.strip() for part in split_src.split('\n') if part.strip()]
+        if len(source_parts) < 2 or ''.join(''.join(source_parts).split()) != ''.join(src.split()):
+            console.print(f"[yellow]Line {i} split is not lossless; keeping original[/yellow]")
+            return
+        src_parts, tr_parts, tr_remerged = align_subs(src, tr, '\n'.join(source_parts))
+        if len(src_parts) != len(tr_parts) or any(not part for part in tr_parts):
+            raise ValueError("Source and target subtitle parts do not match")
         src_lines[i] = src_parts
         tr_lines[i] = tr_parts
         remerged_tr_lines[i] = tr_remerged

@@ -1,7 +1,13 @@
 from ruamel.yaml import YAML
+import os
 import threading
 
-CONFIG_PATH = 'config.yaml'
+# config.yaml lives in the PROJECT ROOT, not the cwd. Batch jobs run with
+# cwd = a per-video workspace (see core/utils/job_context.py), so resolving
+# the config relative to this file's location keeps settings shared across
+# all workspaces. VL_CONFIG override allows tests / alternate installs.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CONFIG_PATH = os.environ.get("VL_CONFIG") or os.path.join(_PROJECT_ROOT, 'config.yaml')
 lock = threading.Lock()
 
 yaml = YAML()

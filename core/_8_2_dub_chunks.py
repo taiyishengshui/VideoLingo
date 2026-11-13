@@ -1,7 +1,7 @@
 import datetime
 import re
 import pandas as pd
-from core._8_1_audio_task import time_diff_seconds
+from core.utils.audio_trim import time_diff_seconds
 from core.asr_backend.audio_preprocess import get_audio_duration
 from core.tts_backend.estimate_duration import init_estimator, estimate_duration
 from core.utils import *

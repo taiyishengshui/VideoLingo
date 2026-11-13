@@ -2,10 +2,10 @@ import os
 import pandas as pd
 import subprocess
 from pydub import AudioSegment
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.console import Console
 from core.utils import *
 from core.utils.models import *
+from core.utils.progress import ChunkProgress
 console = Console()
 
 DUB_VOCAL_FILE = 'output/dub.mp3'
@@ -54,14 +54,12 @@ def process_audio_segment(audio_file):
 def merge_audio_segments(audios, new_sub_times, sample_rate):
     merged_audio = AudioSegment.silent(duration=0, frame_rate=sample_rate)
     
-    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn()) as progress:
-        merge_task = progress.add_task("🎵 Merging audio segments...", total=len(audios))
-        
+    with ChunkProgress("Merging audio segments", len(audios), unit="段") as p:
         for i, (audio_file, time_range) in enumerate(zip(audios, new_sub_times)):
             check_cancel()
             if not os.path.exists(audio_file):
                 console.print(f"[bold yellow]⚠️  Warning: File {audio_file} does not exist, skipping...[/bold yellow]")
-                progress.advance(merge_task)
+                p.advance()
                 continue
                 
             audio_segment = process_audio_segment(audio_file)
@@ -79,7 +77,7 @@ def merge_audio_segments(audios, new_sub_times, sample_rate):
                 merged_audio += silence
                 
             merged_audio += audio_segment
-            progress.advance(merge_task)
+            p.advance()
     
     return merged_audio
 

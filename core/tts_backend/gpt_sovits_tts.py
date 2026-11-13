@@ -90,7 +90,7 @@ def gpt_sovits_tts_for_videolingo(text, save_as, number, task_df):
         if not ref_audio_path.exists():
             # If the file does not exist, try to extract the reference audio
             try:
-                from core._9_refer_audio import extract_refer_audio_main
+                from core.tts_backend.refer_audio import extract_refer_audio_main
                 rprint(f"[yellow]Reference audio file does not exist, attempting extraction: {ref_audio_path}[/yellow]")
                 extract_refer_audio_main()
             except Exception as e:

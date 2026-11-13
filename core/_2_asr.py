@@ -2,7 +2,7 @@ import os, json, subprocess
 from core.utils import *
 from core.asr_backend.demucs_vl import demucs_audio
 from core.asr_backend.audio_preprocess import process_transcription, convert_video_to_audio, prepare_audio_for_asr, split_audio, save_results, normalize_audio_volume, get_audio_duration
-from core._1_ytdlp import find_media_file
+from core.utils.media_files import find_media_file
 from core.utils.models import *
 
 # Checkpoint directory: per-segment transcription results, so an interrupted run
@@ -12,10 +12,21 @@ _SEGMENTS_FILE = os.path.join(_CKPT_DIR, "segments.json")
 
 
 def _audio_fingerprint(audio_file: str) -> dict:
+    # gap_fill 进指纹：补转开关/阈值一变，旧的转写结果就该作废重转 ——
+    # 否则改了补转配置却直接复用上一轮的 checkpoint，补转永远不生效。
+    try:
+        from core.asr_backend.vad_gap_fill import gap_fill_settings
+        gap_fill = gap_fill_settings()
+    except Exception:
+        gap_fill = {"enabled": False}
+    from core.services.asr_service import decode_settings
     return {
         "file": os.path.basename(audio_file),
         "size": os.path.getsize(audio_file),
         "duration": round(get_audio_duration(audio_file), 3),
+        "gap_fill": gap_fill,
+        # Decode-policy changes must not replay earlier prompted/hallucinated ASR.
+        "decode": decode_settings(),
     }
 
 

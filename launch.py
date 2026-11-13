@@ -29,9 +29,9 @@ def main():
     log(f"Python: {sys.version.split()[0]} ({sys.executable})")
 
     # Packages
-    for pkg, imp in [("streamlit", None), ("json_repair", "json_repair")]:
+    for pkg, imp in [("fastapi", None), ("uvicorn", None), ("json_repair", "json_repair")]:
         if not check_package(pkg, imp):
-            errors.append(f"{pkg} not installed. Run: python install.py")
+            errors.append(f"{pkg} not installed. Run: pip install fastapi 'uvicorn[standard]'")
 
     # torch + CUDA
     torch_ver = check_package("torch")
@@ -51,9 +51,10 @@ def main():
         errors.append("ffmpeg not found in PATH. Install: choco install ffmpeg")
 
     # Port
+    port = int(os.environ.get("VL_PORT", "8000"))
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        if s.connect_ex(("127.0.0.1", 8501)) == 0:
-            warnings.append("Port 8501 in use. Close other app or use --server.port 8502")
+        if s.connect_ex(("127.0.0.1", port)) == 0:
+            warnings.append(f"Port {port} in use. Close other app or set VL_PORT to another port")
 
     # Log everything
     for w in warnings:
@@ -75,17 +76,16 @@ def main():
         print()
 
     # Launch
-    log("Launching Streamlit...")
+    log("Launching FastAPI server...")
     os.environ["PYTHONWARNINGS"] = "ignore"
     try:
         proc = subprocess.run(
-            [sys.executable, "-m", "streamlit", "run", "st.py",
-             "--logger.level", "error"],
+            [sys.executable, "-m", "server"],
             cwd=str(SCRIPT_DIR),
         )
         if proc.returncode != 0:
-            log(f"Streamlit exited with code {proc.returncode}")
-            print(f"\n  Streamlit crashed (code {proc.returncode}). See: {LOG_FILE}\n")
+            log(f"Server exited with code {proc.returncode}")
+            print(f"\n  Server crashed (code {proc.returncode}). See: {LOG_FILE}\n")
             sys.exit(proc.returncode)
     except KeyboardInterrupt:
         log("Stopped by user")

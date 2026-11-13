@@ -7,12 +7,12 @@ from typing import Tuple
 import pandas as pd
 from pydub import AudioSegment
 from rich.console import Console
-from rich.progress import Progress
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core.utils import *
 from core.utils.models import *
 from core.asr_backend.audio_preprocess import get_audio_duration
+from core.utils.progress import ChunkProgress
 from core.tts_backend.tts_main import tts_main
 
 console = Console()
@@ -77,10 +77,9 @@ def generate_tts_audio(tasks_df: pd.DataFrame) -> pd.DataFrame:
     """Generate TTS audio sequentially and calculate actual duration"""
     tasks_df['real_dur'] = 0
     rprint("[bold green]🎯 Starting TTS audio generation...[/bold green]")
-    
-    with Progress() as progress:
-        task = progress.add_task("[cyan]🔄 Generating TTS audio...", total=len(tasks_df))
-        
+    rprint(f"🧩 共 {len(tasks_df)} 条待合成")
+
+    with ChunkProgress("Generating TTS audio", len(tasks_df), unit="条") as p:
         # warm up for first 5 rows
         warmup_size = min(WARMUP_SIZE, len(tasks_df))
         for _, row in tasks_df.head(warmup_size).iterrows():
@@ -88,36 +87,49 @@ def generate_tts_audio(tasks_df: pd.DataFrame) -> pd.DataFrame:
                 check_cancel()
                 number, real_dur = process_row(row, tasks_df)
                 tasks_df.loc[tasks_df['number'] == number, 'real_dur'] = real_dur
-                progress.advance(task)
+                p.advance()
             except Exception as e:
                 rprint(f"[red]❌ Error in warmup: {str(e)}[/red]")
                 raise e
         
-        # for gpt_sovits, do not use parallel to avoid mistakes
-        max_workers = load_key("max_workers") if load_key("tts_method") != "gpt_sovits" else 1
+        tts_method = load_key("tts_method")
+        # 本地 GPU 大模型（index-tts 权重常驻显存 3GB+）必须完全串行：
+        # 不能并发（显存 OOM / 重复加载权重），也不进线程池（CUDA 上下文跨线程不稳）。
+        # gpt_sovits 是本地服务，同样保持单线程。
+        max_workers = 1 if tts_method in ("index_tts", "gpt_sovits") else load_key("max_workers")
+
         # parallel processing for remaining tasks
         if len(tasks_df) > warmup_size:
             remaining_tasks = tasks_df.iloc[warmup_size:].copy()
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [
-                    executor.submit(process_row, row, tasks_df.copy())
-                    for _, row in remaining_tasks.iterrows()
-                ]
-                
-                try:
-                    for future in as_completed(futures):
-                        check_cancel()
-                        try:
-                            number, real_dur = future.result()
-                            tasks_df.loc[tasks_df['number'] == number, 'real_dur'] = real_dur
-                            progress.advance(task)
-                        except Exception as e:
-                            rprint(f"[red]❌ Error: {str(e)}[/red]")
-                            raise e
-                except BaseException:
-                    for f in futures:
-                        f.cancel()
-                    raise
+            if tts_method == "index_tts":
+                # 全串行：模型在 warmup 阶段于主线程创建，后续推理仍留在主线程，
+                # 单例权重全程复用，不重复加载、不跨线程搬运 CUDA 上下文。
+                for _, row in remaining_tasks.iterrows():
+                    check_cancel()
+                    number, real_dur = process_row(row, tasks_df)
+                    tasks_df.loc[tasks_df['number'] == number, 'real_dur'] = real_dur
+                    p.advance()
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [
+                        executor.submit(process_row, row, tasks_df.copy())
+                        for _, row in remaining_tasks.iterrows()
+                    ]
+
+                    try:
+                        for future in as_completed(futures):
+                            check_cancel()
+                            try:
+                                number, real_dur = future.result()
+                                tasks_df.loc[tasks_df['number'] == number, 'real_dur'] = real_dur
+                                p.advance()
+                            except Exception as e:
+                                rprint(f"[red]❌ Error: {str(e)}[/red]")
+                                raise e
+                    except BaseException:
+                        for f in futures:
+                            f.cancel()
+                        raise
 
     rprint("[bold green]✨ TTS audio generation completed![/bold green]")
     return tasks_df

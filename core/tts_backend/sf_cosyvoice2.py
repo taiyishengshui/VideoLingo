@@ -22,7 +22,7 @@ def cosyvoice_tts_for_videolingo(text, save_as, number, task_df):
         ref_audio_path = current_dir / "output/audio/refers/1.wav"
         if not ref_audio_path.exists():
             try:
-                from core._9_refer_audio import extract_refer_audio_main
+                from core.tts_backend.refer_audio import extract_refer_audio_main
                 print(f"参考音频文件不存在，尝试提取: {ref_audio_path}")
                 extract_refer_audio_main()
             except Exception as e:

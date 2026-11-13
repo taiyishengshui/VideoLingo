@@ -1,13 +1,27 @@
-librosa==0.11.0
+librosa==0.10.2.post1
 pytorch-lightning==2.6.1
 lightning==2.6.1
-transformers>=4.48.0
+# index-tts 的 indextts/gpt/transformers_generation_utils.py 使用了 transformers
+# 内部符号 NEED_SETUP_CACHE_CLASSES_MAPPING / QUANT_BACKEND_CLASSES_MAPPING，
+# 该符号在 4.57.x 已被移除（实测 4.57.6 直接 ImportError）。必须锁 4.52.1：
+# index-tts/pyproject.toml 写死 transformers==4.52.1，其官方 uv.lock 亦锁 4.52.1。
+# 同时满足 vl 侧全部下限约束: VideoLingo>=4.48.0, whisperx>=4.48.0,
+# pyannote-audio>=4.48.3, torchmetrics>=4.43.0。请勿升级。
+transformers==4.52.1
 moviepy==1.0.3
-numpy>=2.0.2
-openai>=1.55.3,<2
+numpy==2.2.6
+# 原约束 openai<2 已过时。实测 (vl) 环境为 openai 2.49.0，且
+# langchain-openai==1.4.1 硬要求 openai>=2.45.0,<3。若保留 <2，
+# 执行 pip install -r requirements.txt 会把 openai 强降到 1.x 并破坏 vl 的
+# LLM 调用链。此处对齐实测与硬约束；请勿改回 <2。
+openai>=2.45.0,<3
+# index-tts 运行时完全不 import cv2，其 pyproject 里 opencv==4.9.0.80 的
+# 约束对配音链路无影响，不必跟随。4.9.0.80 是 NumPy 1.x ABI，在当前
+# numpy 2.2.6 下会让 vl 的 cv2 导入失败 (_ARRAY_API not found)。
+# 保留 vl 原版 4.11.0.86（兼容 NumPy 2.x）。
 opencv-python==4.11.0.86
 openpyxl==3.1.5
-pandas>=2.2.3
+pandas==2.3.2
 pydub==0.25.1
 PyYAML==6.0.3
 replicate==0.33.0
@@ -16,6 +30,11 @@ resampy==0.4.3
 # Keep spaCy on the 3.8 line. Exact patch pins can be unavailable for a
 # specific Python minor version on some mirrors, which makes setup brittle.
 spacy>=3.8.7,<3.9
+# Web UI (React frontend + this backend); streamlit kept only because
+# core/st_utils/imports_and_utils.py (used by batch/) still imports it —
+# drop both in phase 3.
+fastapi>=0.115
+uvicorn[standard]>=0.30
 streamlit==1.49.1
 streamlit-searchbox
 yt-dlp
@@ -34,6 +53,96 @@ whisperx>=3.8.1
 
 syllables
 pypinyin
-g2p-en
+g2p-en==2.1.0
 xmltodict
 
+# =====================================================================
+# index-tts 配音插件 (本地路径: D:/code/index-tts, 版本 2.0.0 / IndexTTS-2.5)
+# ---------------------------------------------------------------------
+# 前置条件:
+#   - Python 3.10 或 3.11 (index-tts requires-python ">=3.10,<3.12")。
+#     当前 (vl) 环境为 Python 3.10.0，已满足。请勿升到 3.12+。
+#   - torch==2.8.0 / torchaudio==2.8.0 由 installer.py 的 TORCH_VERSION 统一安装，
+#     已满足 index-tts 的 torch==2.8.* / torchaudio==2.8.*，无需在此重复声明。
+#   - 官方 docs/README2.5_ZH.md 明确声明「仅支持 uv 安装，conda/pip 无法保证
+#     依赖版本正确，可能导致偶发报错、GPU 加速失效」。本配置属非官方路径：
+#     通过 --no-deps + 精确 pin 手工复刻 uv.lock 的解析结果，需自行验证推理。
+#   - 本机 torch 为 2.8.0+cu126，官方 uv.lock 为 2.8.0+cu128 (要求 CUDA 12.8+)。
+#     import 与 CPU 推理不受影响；若 GPU 加速异常，属此差异所致。
+#
+# requirements.txt 位于 D:\code\vl，全量安装需在此目录执行；
+# 亦可用绝对路径，任意目录均可: pip install -r D:/code/vl/requirements.txt
+#
+# 全新环境安装顺序:
+#   cd /d D:\code\vl
+#   pip install -r requirements.txt
+#   pip install -e D:/code/index-tts --no-deps   # 必须 --no-deps，避免 index-tts
+#      自带的严格 pin 回灌并覆盖上方已对齐的共享版本。
+#
+# 已有环境（当前 (vl) 就是这种）无需全量重装；若 transformers/tokenizers 被
+# 意外升级导致 import 失败，最小修复只需精确回退这两个包:
+#   pip install "transformers==4.52.1" "tokenizers==0.21.0"
+# 或执行 pip install -r D:/code/vl/requirements.txt 一次性对齐（本文件已修正
+# openai 约束，不会再误降 vl 的包）。修复后运行 pip check 复核。
+#
+# 模型权重: D:/code/index-tts/checkpoints 已下载完整
+#   (config.yaml / gpt.pth / s2mel.pth / codec.pth / qwen0.6bemo4-merge 等)，
+#   无需重复下载。当前仓库代码用 checkpoints/config.yaml；
+#   docs/README2.5_ZH.md 为旧版文档，其 checkpoints_25/config_v2_5.yaml 已不适用。
+# 如需重新拉取 (国内镜像 HF_ENDPOINT=https://hf-mirror.com):
+#   uv tool install "huggingface-hub"
+#   hf download IndexTeam/IndexTTS-2.5 --local-dir=checkpoints
+#
+# 调用示例 (在 vl 中配音，用绝对路径，因为 vl 的工作目录是 D:\code\vl):
+#   from indextts.infer_v2_5 import IndexTTS2
+#   tts = IndexTTS2(cfg_path="D:/code/index-tts/checkpoints/config.yaml",
+#                   model_dir="D:/code/index-tts/checkpoints", use_bf16=True)
+#   tts.infer(spk_audio_prompt="ref.wav", text="你好世界", lang="ZH",
+#             output_path="out.wav")
+#
+# 验证: python -c "from indextts.infer_v2_5 import IndexTTS2; print('OK')"
+# =====================================================================
+# 与 vl 共享、且必须对齐到 index-tts 验证版本的包 (见上方已修改的 pin):
+#   librosa==0.10.2.post1, transformers==4.52.1, tokenizers==0.21.0,
+#   numpy==2.2.6, pandas==2.3.2, g2p-en==2.1.0
+# 唯一例外是 opencv-python：index-tts 不用 cv2，故按 vl 侧保留 4.11.0.86
+# 以兼容 NumPy 2.x（详见上方 opencv 注释）。
+# ---------------------------------------------------------------------
+# index-tts 2.0.0 运行所需、但 vl 原本未包含的依赖。版本取自 (vl) 环境实测，
+# 已与 pyproject.toml / uv.lock 逐条核对：仅 transformers、tokenizers 必须严格
+# 等于 uv.lock 的 4.52.1 / 0.21.0；其余取实测值 (einops 0.8.2, omegaconf 2.3.1,
+# sentencepiece 0.2.3, textstat 0.7.13, tqdm 4.68.4, wetext 0.2.1 等) 虽略高于
+# uv.lock，但都落在 pyproject 的 >= 范围内且实测可共存，如此可避免降级 vl 现状:
+accelerate==1.8.1
+cn2an==0.5.22
+Cython==3.0.7
+descript-audiotools==0.7.2
+einops==0.8.2
+ffmpeg-python==0.2.0
+fugashi==1.5.2
+unidic-lite==1.0.8
+jieba==0.42.1
+json5==0.10.0
+matplotlib==3.10.0
+modelscope==1.27.0
+# NOTE: keras==2.9.0 已从依赖中移除。index-tts 的配音主路径 (infer_v2_5)
+# 并不 import keras；其 pyproject 虽声明 keras==2.9.0，但该版本依赖 TensorFlow，
+# 而当前 (vl) 环境并未安装 tensorflow（keras 是以 --no-deps 带入的无效依赖）。
+# 若写进 requirements.txt，全新安装会误拉 TensorFlow。仅当使用可选的 GPT-2 加速
+# 路径 (indextts/gpt/transformers_gpt2.py) 时才需要，且该路径需另行安装 tensorflow。
+munch==4.0.0
+numba==0.63.0
+omegaconf==2.3.1
+safetensors==0.5.2
+sentencepiece==0.2.3
+tensorboard==2.20.0
+textstat==0.7.13
+# transformers 4.52.1 要求 tokenizers>=0.21,<0.22，必须锁 0.21.0。
+tokenizers==0.21.0
+tqdm==4.68.4
+openai-whisper==20250625
+wetext==0.2.1; sys_platform != 'linux'
+# WeTextProcessing; sys_platform == 'linux'   # Linux 部署时改用此行替代 wetext
+#
+# 可选 (仅 index-tts WebUI 需要，Python API 配音不需要):
+#   gradio==5.45.0   # 当前 (vl) 环境实测为 6.32.0；如不使用 webui.py 可不装

@@ -1,7 +1,7 @@
 import functools
 import time
 import os
-from rich import print as rprint
+from core.utils.log_hooks import rprint
 
 # Sentinel that distinguishes "default_return not provided" from any
 # user-provided value (including None, 0, "", False).

@@ -5,10 +5,12 @@ import cv2
 import numpy as np
 from rich.console import Console
 
-from core._1_ytdlp import find_video_files
+from core.utils.media_files import find_video_files
 from core.asr_backend.audio_preprocess import normalize_audio_volume
 from core.utils import *
 from core.utils.models import *
+from core.utils.subprocess_log import run_logged
+from core.services.encode_service import build_encode_args
 
 console = Console()
 
@@ -30,7 +32,7 @@ TRANS_BACK_COLOR = '&H33000000'
 
 def merge_video_audio():
     """Merge video and audio, and reduce video volume"""
-    from core._1_ytdlp import is_audio_only_input
+    from core.utils.media_files import is_audio_only_input
     if is_audio_only_input():
         rprint("[bold green]🎵 Audio-only input: skipping dubbing video merge. Dubbed audio is in the `output` directory.[/bold green]")
         return
@@ -70,7 +72,7 @@ def merge_video_audio():
     )
     
     cmd = [
-        'ffmpeg', '-y', '-i', VIDEO_FILE, '-i', background_file, '-i', normalized_dub_audio,
+        'ffmpeg', '-hide_banner', '-y', '-i', VIDEO_FILE, '-i', background_file, '-i', normalized_dub_audio,
         '-filter_complex',
         f'[0:v]scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,'
         f'pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2,'
@@ -78,15 +80,16 @@ def merge_video_audio():
         f'[1:a][2:a]amix=inputs=2:duration=first:dropout_transition=3[a]'
     ]
 
-    if load_key("ffmpeg_gpu"):
-        rprint("[bold green]Using GPU acceleration...[/bold green]")
-        cmd.extend(['-map', '[v]', '-map', '[a]', '-c:v', 'h264_nvenc'])
-    else:
-        cmd.extend(['-map', '[v]', '-map', '[a]'])
+    cmd.extend(['-map', '[v]', '-map', '[a]'])
+    # 配音音轨是 amix 新生成的，不能直通；其余编码参数仍对齐原片（FR-29）
+    enc_args, enc_desc = build_encode_args(VIDEO_FILE, audio_reencode=True)
+    cmd.extend(enc_args)
+    cmd.append(DUB_VIDEO)
+    rprint(f"[cyan]🎛️ 输出编码对齐原片：{enc_desc}[/cyan]")
     
-    cmd.extend(['-c:a', 'aac', '-b:a', '96k', DUB_VIDEO])
-    
-    subprocess.run(cmd)
+    proc = run_logged(cmd)
+    if proc.returncode != 0:
+        raise RuntimeError(f"FFmpeg 合成失败（返回码 {proc.returncode}），详见上方输出")
     rprint(f"[bold green]Video and audio successfully merged into {DUB_VIDEO}[/bold green]")
 
 if __name__ == '__main__':

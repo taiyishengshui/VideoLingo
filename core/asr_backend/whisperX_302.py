@@ -5,7 +5,7 @@ import time
 import requests
 import librosa
 import soundfile as sf
-from rich import print as rprint
+from core.utils.log_hooks import rprint
 from core.utils import *
 from core.utils.models import *
 

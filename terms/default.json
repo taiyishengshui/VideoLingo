@@ -1,0 +1,70 @@
+{
+  "desc": "从上次 4.1 输出导入（output/log/terminology.json）",
+  "terms": [
+    {
+      "src": "Positive learning strategy",
+      "tgt": "积极学习策略",
+      "note": "指通过特定心理结构来促进高效学习的思维模式。"
+    },
+    {
+      "src": "Metaprogram distinctions",
+      "tgt": "元程序区分",
+      "note": "指个体处理信息时所采用的深层思维过滤模式。"
+    },
+    {
+      "src": "Jump start",
+      "tgt": "启动点/起动机制",
+      "note": "指触发动机感或行动意愿的瞬间。"
+    },
+    {
+      "src": "Kicker",
+      "tgt": "激励触发点",
+      "note": "指策略中从准备阶段过渡到产生强烈行动欲望的关键环节。"
+    },
+    {
+      "src": "Azimuth",
+      "tgt": "方位角",
+      "note": "用于描述内部图像或声音在心理空间中的水平位置。"
+    },
+    {
+      "src": "Internal representation",
+      "tgt": "内部表征",
+      "note": "指个体在头脑中对外部世界进行编码的图像、声音和感觉。"
+    },
+    {
+      "src": "Sensorium",
+      "tgt": "感官总和/感知域",
+      "note": "指个体在心理空间中构建的视觉、听觉和动觉的综合体验场。"
+    },
+    {
+      "src": "Kinesthetic effect",
+      "tgt": "动觉效应",
+      "note": "指通过心理表征引发的身体感受或情绪反应。"
+    },
+    {
+      "src": "Timeline",
+      "tgt": "时间线",
+      "note": "指个体在心理上对过去、现在和未来事件的排列方式。"
+    },
+    {
+      "src": "Timbre",
+      "tgt": "音色",
+      "note": "指声音的质感，用于增强心理听觉表征的丰富度。"
+    },
+    {
+      "src": "Peripheral vision",
+      "tgt": "周边视觉",
+      "note": "指在心理表征中扩展图像覆盖范围至视野边缘。"
+    },
+    {
+      "src": "Dimensionality",
+      "tgt": "维度感",
+      "note": "指将心理图像从二维平面提升至三维空间感。"
+    },
+    {
+      "src": "Motivation strategy",
+      "tgt": "动机策略",
+      "note": "指个体产生和维持行动意愿的一系列心理步骤。"
+    }
+  ]
+}

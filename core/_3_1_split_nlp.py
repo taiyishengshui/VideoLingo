@@ -12,8 +12,11 @@ def split_by_spacy():
 
     nlp = init_nlp()
     split_by_mark(nlp)
-    split_by_comma_main(nlp)
-    split_sentences_main(nlp)
+    # 2026-09-08: comma/connector splitters removed from the chain.
+    # They were designed to make subtitles short, but running them BEFORE
+    # translation shredded sentences and hurt translation quality. Shortening
+    # now happens AFTER translation in _5_split_sub. split_long_by_root reads
+    # SPLIT_BY_MARK_FILE directly and remains as the >80-token safety valve.
     split_long_by_root_main(nlp)
     return
 

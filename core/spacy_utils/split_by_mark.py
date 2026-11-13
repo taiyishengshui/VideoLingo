@@ -3,7 +3,7 @@ import pandas as pd
 import warnings
 from core.spacy_utils.load_nlp_model import init_nlp, SPLIT_BY_MARK_FILE
 from core.utils.config_utils import load_key, get_joiner
-from rich import print as rprint
+from core.utils.log_hooks import rprint
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 

@@ -64,7 +64,12 @@ def tts_main(text, save_as, number, task_df):
                 cosyvoice_tts_for_videolingo(text, save_as, number, task_df)
             elif TTS_METHOD == 'f5tts':
                 f5_tts_for_videolingo(text, save_as, number, task_df)
-                
+            elif TTS_METHOD == 'index_tts':
+                # 局部导入：只有真正选用本地大模型配音时才触碰 indextts 依赖，
+                # 既避免拖慢 vl 启动，也避免未装插件时影响其他配音方式。
+                from core.tts_backend.index_tts import index_tts_for_videolingo
+                index_tts_for_videolingo(text, save_as, number, task_df)
+
             # Check generated audio duration
             duration = get_audio_duration(save_as)
             if duration > 0:

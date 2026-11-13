@@ -1,7 +1,7 @@
 import os
 import string
 import warnings
-from core.spacy_utils.load_nlp_model import init_nlp, SPLIT_BY_CONNECTOR_FILE
+from core.spacy_utils.load_nlp_model import init_nlp, SPLIT_BY_MARK_FILE
 from core.utils import *
 from core.utils.models import _3_1_SPLIT_BY_NLP
 
@@ -44,7 +44,7 @@ def split_extremely_long_sentence(doc):
     tokens = [token.text for token in doc]
     n = len(tokens)
     
-    num_parts = (n + 59) // 60  # round up
+    num_parts = (n + 79) // 80  # round up
     
     part_length = n // num_parts
     
@@ -62,15 +62,19 @@ def split_extremely_long_sentence(doc):
 
 
 def split_long_by_root_main(nlp):
-    with open(SPLIT_BY_CONNECTOR_FILE, "r", encoding="utf-8") as input_file:
+    # 2026-09-08: reads SPLIT_BY_MARK_FILE directly — the comma/connector
+    # stages were removed from the pre-translation chain. Threshold raised
+    # 60 -> 80 tokens: this is now only a safety valve for pathologically
+    # long sentences; real shortening happens post-translation in _5.
+    with open(SPLIT_BY_MARK_FILE, "r", encoding="utf-8") as input_file:
         sentences = input_file.readlines()
 
     all_split_sentences = []
     for sentence in sentences:
         doc = nlp(sentence.strip())
-        if len(doc) > 60:
+        if len(doc) > 80:
             split_sentences = split_long_sentence(doc)
-            if any(len(nlp(sent)) > 60 for sent in split_sentences):
+            if any(len(nlp(sent)) > 80 for sent in split_sentences):
                 split_sentences = [subsent for sent in split_sentences for subsent in split_extremely_long_sentence(nlp(sent))]
             all_split_sentences.extend(split_sentences)
             rprint(f"[yellow]✂️  Splitting long sentences by root: {sentence[:30]}...[/yellow]")
@@ -90,7 +94,7 @@ def split_long_by_root_main(nlp):
             output_file.write(sentence + "\n")
 
     # delete the original file
-    os.remove(SPLIT_BY_CONNECTOR_FILE)   
+    os.remove(SPLIT_BY_MARK_FILE)
 
     rprint(f"[green]💾 Long sentences split by root saved to →  {_3_1_SPLIT_BY_NLP}[/green]")
 
