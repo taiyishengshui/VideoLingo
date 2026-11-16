@@ -20,14 +20,26 @@ def _audio_fingerprint(audio_file: str) -> dict:
     except Exception:
         gap_fill = {"enabled": False}
     from core.services.asr_service import decode_settings
-    return {
+    from core.utils.config_utils import load_key
+    try:
+        runtime = str(load_key("whisper.runtime"))
+    except KeyError:
+        runtime = "local"
+    # FR-35: switching ASR backends must invalidate the per-segment checkpoint,
+    # otherwise whisperX and Qwen3-ASR results would be mixed in one workbook.
+    fp = {
         "file": os.path.basename(audio_file),
         "size": os.path.getsize(audio_file),
         "duration": round(get_audio_duration(audio_file), 3),
         "gap_fill": gap_fill,
+        "runtime": runtime,
         # Decode-policy changes must not replay earlier prompted/hallucinated ASR.
         "decode": decode_settings(),
     }
+    if runtime == "qwen3_asr":
+        from core.asr_backend.qwen3_asr import qwen3_signature
+        fp["qwen3"] = qwen3_signature()
+    return fp
 
 
 def _load_or_save_segments(audio_file: str) -> list:
@@ -247,7 +259,8 @@ def transcribe():
     segments = _load_or_save_segments(_RAW_AUDIO_FILE)
 
     # 3.5 Adaptive domain hints: local runtime only (the probe uses the local
-    # whisper model; cloud/elevenlabs runtimes skip hints entirely).
+    # whisper model; cloud / elevenlabs / qwen3_asr skip hints entirely —
+    # v1.11 showed prompts/hotwords cause dropped words, so Qwen3-ASR gets none).
     runtime = load_key("whisper.runtime")
     asr_hints = None
     if runtime == "local":
@@ -274,6 +287,14 @@ def transcribe():
     elif runtime == "elevenlabs":
         from core.asr_backend.elevenlabs_asr import transcribe_audio_elevenlabs as ts
         rprint("[cyan]🎤 Transcribing audio with ElevenLabs API...[/cyan]")
+    elif runtime == "qwen3_asr":
+        from core.asr_backend.qwen3_asr import transcribe_audio_qwen3_asr as ts
+        rprint("[cyan]🎤 Transcribing audio with local Qwen3-ASR (isolated env)...[/cyan]")
+    else:
+        raise ValueError(
+            f"未知 whisper.runtime='{runtime}'；可用 local / cloud / elevenlabs / "
+            "qwen3_asr。绝不静默回退到其它后端。"
+        )
 
     for i in range(start_index, len(segments)):
         check_cancel()

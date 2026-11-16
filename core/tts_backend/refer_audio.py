@@ -60,6 +60,12 @@ def _refers_complete(df) -> bool:
 
 
 def extract_refer_audio_main():
+    # Lazy import on purpose: core/__init__.py imports this module, so a
+    # top-level `import voice_map` puts it in sys.modules before runpy can
+    # execute `python -m core.tts_backend.voice_map`, which emits a
+    # "found in sys.modules ... unpredictable behaviour" RuntimeWarning.
+    from core.tts_backend.voice_map import maybe_build_voice_map
+
     # refer_mode=1 is the ONLY case with no original vocals: it uses a preset
     # wav, so Demucs (~2.5 min GPU) would produce slices nobody reads.
     # Create the marker dir so the pipeline registers step 9 as done.
@@ -79,6 +85,9 @@ def extract_refer_audio_main():
     df = pd.read_excel(_8_1_AUDIO_TASK)
     if _refers_complete(df):
         rprint(Panel(f"原声参考音频已齐全（{len(df)} 条），跳过提取", title="Info", border_style="blue"))
+        # refer_mode=4 still needs the per-speaker contract even when the
+        # clips are already on disk. No-op for every other mode.
+        maybe_build_voice_map()
         return
 
     # Create output directory
@@ -107,6 +116,7 @@ def extract_refer_audio_main():
                  f"refer_mode=2 用 1.wav（全片统一音色）；refer_mode=3 逐句使用对应片段。"
                  f" 原声模式不会使用 spk_audio_prompt 预置音色。",
                  title="Success", border_style="green"))
+    maybe_build_voice_map()
 
 
 if __name__ == "__main__":

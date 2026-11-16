@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Button, Card, List, Space, Table, Tag, Typography, message } from 'antd'
+import { Alert, Button, Card, List, Space, Table, Tag, Typography, message } from 'antd'
 import {
   ArrowLeftOutlined, DownloadOutlined, FileOutlined, FolderOpenOutlined,
   HomeOutlined, ReloadOutlined,
@@ -79,6 +79,18 @@ export default function ArtifactsPage() {
   return (
     <div>
       {ctxHolder}
+      <Alert type="info" showIcon style={{ marginBottom: 12 }}
+        message="说话人分配与逐句重配在「配音分配」页"
+        description={
+          <Space direction="vertical" size={6} align="start">
+            <Typography.Text style={{ fontSize: 12 }}>
+              这里只浏览和下载产物文件；逐句改说话人、试听代表音色、标记模糊句、重配单句请到配音分配页。
+            </Typography.Text>
+            <Button size="small" onClick={() => { window.location.hash = '/voices' }}>
+              打开配音分配
+            </Button>
+          </Space>
+        } />
       <Card size="small" style={{ marginBottom: 12 }}>
         <Space style={{ marginBottom: 8 }}>
           <Button size="small" icon={<HomeOutlined />} onClick={() => load(null)}>根</Button>

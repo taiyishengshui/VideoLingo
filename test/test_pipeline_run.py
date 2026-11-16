@@ -270,6 +270,48 @@ def test_run_log_captures_stdout_of_the_job(monkeypatch, tmp_path):
     assert "步骤开始" in text          # 步骤边界也要记下来
 
 
+def test_failed_job_records_failed_step_and_error_state(monkeypatch, tmp_path):
+    """崩溃的步骤必须被记录到 failed_step，前端才能显示「失败」而非「未运行」。
+
+    v1.32 前：_run 的 finally 清空 current_step，前端无法定位失败步骤，
+    失败与「从未运行」在 UI 上完全一样（灰色时钟 + 未运行）。
+    """
+    import server.task_manager as tm
+    import server.logbus as lb
+    monkeypatch.setattr(lb, "LOG_DIR", str(tmp_path / "log"))
+    mgr = tm.TaskManager()
+    ok, _ = mgr.start_job("boom", lambda: (_ for _ in ()).throw(RuntimeError("kaboom")))
+    assert ok
+    mgr._thread.join(timeout=10)
+    assert mgr.state == "error"
+    assert mgr.failed_step == "boom"
+    assert "kaboom" in mgr.error
+    snap = mgr.snapshot()
+    assert snap["failed_step"] == "boom"
+    assert snap["stopped_step"] is None
+
+
+def test_stopped_job_records_stopped_step(monkeypatch, tmp_path):
+    """用户中止的步骤必须被记录到 stopped_step，前端才能显示「已停止」。"""
+    import server.task_manager as tm
+    import server.logbus as lb
+    from core.st_utils.task_runner import StopTask
+    monkeypatch.setattr(lb, "LOG_DIR", str(tmp_path / "log"))
+    mgr = tm.TaskManager()
+
+    def _raise_stop():
+        raise StopTask()
+
+    ok, _ = mgr.start_job("halt", _raise_stop)
+    assert ok
+    mgr._thread.join(timeout=10)
+    assert mgr.state == "stopped"
+    assert mgr.stopped_step == "halt"
+    snap = mgr.snapshot()
+    assert snap["stopped_step"] == "halt"
+    assert snap["failed_step"] is None
+
+
 def test_busy_manager_is_409(run_client, monkeypatch):
     import server.app as app_mod
     monkeypatch.setattr(app_mod, "MANAGER", FakeManager(ok=False))
@@ -412,8 +454,8 @@ def test_force_only_cleans_the_selected_range(run_client):
 
 @pytest.mark.parametrize("burn,audio_only,end", [
     (True, False, "merge_sub"),
-    (False, False, "align"),
-    (True, True, "align"),
+    (False, False, "gen_sub"),
+    (True, True, "gen_sub"),
 ])
 def test_stage_one_force_follows_default_range_and_preserves_input(
         run_client, cfg_path, tmp_cwd, burn, audio_only, end):
@@ -425,7 +467,8 @@ def test_stage_one_force_follows_default_range_and_preserves_input(
     selected = run_client.get("/api/pipeline").json()["defaults"]
     response = run_client.post("/api/pipeline/run", json={**selected, "force": True})
     assert response.status_code == 200
-    expected = ["transcribe", "asr_correct", "split", "translate", "align"]
+    expected = ["transcribe", "asr_correct", "split", "translate",
+                "align", "gen_sub"]
     if end == "merge_sub":
         expected.append("merge_sub")
     assert response.json()["steps"] == expected
@@ -450,7 +493,7 @@ def test_pipeline_status_exposes_default_range(run_client, cfg_path):
     """结束步骤默认值跟随设置里的烧录开关；开始固定转录。"""
     cfg_path(MEDIA_CONFIG + "\nburn_subtitles: false\n")
     assert run_client.get("/api/pipeline").json()["defaults"] == {
-        "from_step": "transcribe", "to_step": "align"}
+        "from_step": "transcribe", "to_step": "gen_sub"}
 
     cfg_path(MEDIA_CONFIG + "\nburn_subtitles: true\n")
     assert run_client.get("/api/pipeline").json()["defaults"] == {

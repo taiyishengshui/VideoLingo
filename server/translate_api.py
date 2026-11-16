@@ -226,14 +226,15 @@ def get_term_sets():
     `catalog.rows` is the deduped union; `catalog.sources` is each source
     file's COMPLETE list (every terms/*.json + output/log/terminology.json),
     so #/terms can display the whole content of each file without opening
-    an editor. Extending this response (instead of adding GET /terms/review
-    or /terms/catalog) avoids the dynamic GET /terms/{name} route swallowing
-    the sub-path. `catalog` is decided entirely in translate_service; this
-    layer only adapts HTTP -> service (G-01).
+    an editor. `history` indexes the archived glossaries available for
+    import. Extending this response (instead of adding GET /terms/review,
+    /terms/catalog or /terms/history) avoids the dynamic GET /terms/{name}
+    route swallowing the sub-path. All reads/decisions live in
+    translate_service; this layer only adapts HTTP -> service (G-01).
     """
     from core.services.translate_service import (
-        active_term_names, list_term_sets, load_active_terms, load_job_terms,
-        term_catalog,
+        active_term_names, history_term_sources, list_term_sets,
+        load_active_terms, load_job_terms, term_catalog,
     )
     sets = list_term_sets()
     job = load_job_terms(allow_fallback=False)
@@ -251,6 +252,8 @@ def get_term_sets():
         # not, + the per-job glossary). Extending GET /terms instead of adding
         # a sub-route: the dynamic GET /terms/{name} would swallow it.
         "catalog": term_catalog(),
+        # v1.23: archived glossaries (metadata only) for the import picker.
+        "history": history_term_sources(),
     }
 
 
@@ -288,6 +291,43 @@ def write_back(req: WriteBackRequest):
         stats = write_back_terms(req.target, req.srcs, req.overwrite)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    return {"ok": True, **stats}
+
+
+class HistoryPreviewRequest(BaseModel):
+    names: list[str]           # exact history/<name> directory names
+
+
+@router.post("/terms/history/preview")
+def history_preview(req: HistoryPreviewRequest):
+    """Read-only dedup preview of selected archived glossaries. Never writes
+    anything. POST (not GET) because GET /terms/{name} would swallow the
+    sub-path; path resolution + merge both live in translate_service."""
+    from core.services.translate_service import history_import_preview
+    try:
+        return history_import_preview(req.names)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+class HistoryImportRequest(BaseModel):
+    target: str                # existing set name, or a NEW name to create
+    names: list[str]           # archives to re-read server-side
+    srcs: list[str]            # selected KEYS only — values are re-read
+    overwrite: bool = False    # default: keep manually maintained tgt/note
+    desc: str | None = None    # optional description for a NEW set
+
+
+@router.post("/terms/history/import")
+def history_import(req: HistoryImportRequest):
+    """Checked archived terms -> ONE base term set. Only terms/*.json is
+    written: output/, history/, checkpoint and GPT cache stay untouched."""
+    from core.services.translate_service import import_history_terms
+    try:
+        stats = import_history_terms(req.target, req.names, req.srcs,
+                                     req.overwrite, req.desc)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     return {"ok": True, **stats}
 
 

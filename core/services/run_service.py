@@ -20,16 +20,16 @@ Step selection rules (one place):
 
 Default range rules (also here, so UI/CLI/batch cannot disagree):
 - start: always `transcribe` (stage 1 begins at ASR)
-- end:   `merge_sub` when burn_subtitles is on, otherwise `align` —
+- end:   `merge_sub` when burn_subtitles is on, otherwise `gen_sub` —
          with burn off, step 7 only writes a 0-second placeholder video,
-         so "生成字幕" (src.srt / trans.srt) is the real end of the job.
+         so "生成字幕" (src.srt / trans.srt, step 6) is the real end of the job.
 """
 
 from __future__ import annotations
 
 DEFAULT_START_STEP = "transcribe"
 BURN_END_STEP = "merge_sub"        # 合并字幕到视频（真烧录）
-NO_BURN_END_STEP = "align"         # 对齐字幕（生成 srt），不烧录时到此为止
+NO_BURN_END_STEP = "gen_sub"       # 第 6 步「生成字幕」（产出 srt），不烧录时到此为止
 
 
 def burn_subtitles_enabled() -> bool:

@@ -45,6 +45,21 @@ autocorrect-py
 ctranslate2>=4.5.0
 edge-tts
 pyannote-audio>=4.0.0
+# ⚠️ protobuf 版本冲突（v1.34，第 2 步 ASR ImportError 根因，勿删）
+#   pyannote-audio>=4.0 → opentelemetry-proto>=1.34 → protobuf>=5.0,<8
+#   descript-audiotools==0.7.2（下方）→ protobuf<3.20,>=3.9.2（历史遗留 pin，
+#     其源码完全不 import protobuf，只是随 tensorboard 间接声明）
+# 两者数学上不可调和：pip 最终留 3.19.6，于是 whisperx.load_model 的 import 链
+# (whisperx.vads → pyannote.audio → opentelemetry → common_pb2) 抛
+# "cannot import name 'builder' from google.protobuf.internal" —— builder 自
+# protobuf 3.20 才有，而 common_pb2 由 protoc 5.26.1 生成、硬性需要它。
+# 故本文件**故意不写 protobuf 行**：写了会与 descript-audiotools 直接
+# ResolutionImpossible。installer.py 在 base 安装后用 --no-deps 兜底对齐到
+# PROTOBUF_VERSION；已有环境手动修复同理：
+#   python -m pip install --no-deps "protobuf==5.29.6"
+#   python -c "from google.protobuf.internal import builder; print('OK')"
+# 修复后 `pip check` 会残留一条 descript-audiotools 与 protobuf 5.x 不兼容，
+# 这是已知且唯一可接受的冲突（该包运行时不碰 protobuf），切勿为消掉它降回 3.19.6。
 
 # demucs and whisperx are installed separately in install.py
 # to avoid torchaudio version conflicts between demucs (<2.2) and whisperx (~=2.8.0).

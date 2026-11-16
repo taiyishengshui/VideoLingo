@@ -36,6 +36,9 @@ TORCH_INDEX = "https://download.pytorch.org/whl"
 BOOTSTRAP_PACKAGES = ["requests", "rich", "ruamel.yaml", "InquirerPy", "packaging"]
 FILTERED_REQUIREMENTS = {"spacy", "whisperx"}
 DEMUX_GIT = "demucs[dev]@git+https://github.com/adefossez/demucs@b9ab48cad45976ba42b2ff17b229c071f0df9390"
+# opentelemetry-proto (pulled by pyannote-audio>=4) needs protobuf>=5; pip
+# leaves 3.19.6 because descript-audiotools hard-pins <3.20. See requirements.txt.
+PROTOBUF_VERSION = "5.29.6"  # 5.29.5 has CVE-2026-0994 (DoS); 5.29.6 is the fix
 
 
 def run(cmd: list[str], retries: int = 0, env: dict[str, str] | None = None) -> None:
@@ -227,6 +230,32 @@ def install_torch(force: bool = False) -> None:
         pip_install(packages, retries=3)
 
 
+def protobuf_version_ok() -> bool:
+    """True when protobuf major >= 5 (opentelemetry-proto >=1.34 requires it)."""
+    version = package_version("protobuf")
+    if version is None:
+        return False
+    try:
+        return int(version.split(".")[0]) >= 5
+    except ValueError:
+        return False
+
+
+def ensure_protobuf() -> None:
+    """Align protobuf after base install (single-variable fix, touches nothing else).
+
+    descript-audiotools==0.7.2 pins protobuf<3.20 but never imports it, while
+    pyannote-audio>=4 pulls opentelemetry-proto requiring >=5. Without this,
+    whisperx.load_model crashes importing pyannote.audio with
+    "cannot import name 'builder' from google.protobuf.internal".
+    """
+    if protobuf_version_ok():
+        return
+    current = package_version("protobuf")
+    print(f"  protobuf {current or 'missing'} too old for opentelemetry-proto; aligning to {PROTOBUF_VERSION}")
+    pip_install([f"protobuf=={PROTOBUF_VERSION}"], retries=3, extra_args=["--no-deps"])
+
+
 def install_base_requirements(force: bool = False) -> None:
     print("\n[4/7] Install base requirements")
     state = load_state()
@@ -371,6 +400,12 @@ def health_check(quiet: bool = False, require_demucs: bool = False, check_state:
             errors.append(f"missing package: {package}")
         elif prefix and not version.split("+")[0].startswith(prefix):
             errors.append(f"{package} version {version} does not match expected {prefix}*")
+    if not protobuf_version_ok():
+        errors.append(
+            f"protobuf {package_version('protobuf') or 'missing'} too old for "
+            f"opentelemetry-proto (need >=5); run installer.py or "
+            f"python -m pip install --no-deps protobuf=={PROTOBUF_VERSION}"
+        )
     if require_demucs and package_version("demucs") is None:
         errors.append("missing optional package required by flag: demucs")
     elif package_version("demucs") is None:
@@ -381,7 +416,7 @@ def health_check(quiet: bool = False, require_demucs: bool = False, check_state:
         errors.append("ffmpeg not found in PATH")
     if not quiet:
         print("\nEnvironment check")
-        for package in ["streamlit", "torch", "torchaudio", "spacy", "whisperx", "demucs"]:
+        for package in ["streamlit", "torch", "torchaudio", "spacy", "whisperx", "demucs", "protobuf"]:
             print(f"  {package}: {package_version(package) or 'missing'}")
         for warning in warnings:
             print(f"  WARN: {warning}")
@@ -401,6 +436,7 @@ def install_all(args: argparse.Namespace) -> int:
     maybe_configure_mirror(args.auto_mirror)
     install_torch(force=args.force)
     install_base_requirements(force=args.force)
+    ensure_protobuf()  # base install may downgrade protobuf via descript-audiotools
     install_spacy(force=args.force)
     install_whisperx(force=args.force)
     if not args.skip_demucs:

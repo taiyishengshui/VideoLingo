@@ -47,6 +47,14 @@ _EXACT_LANG = {
     "arabic": "AR", "阿拉伯语": "AR",
 }
 
+# Optional quality/speed trade-off keys forwarded to IndexTTS2.infer().
+# An empty config section means the engine's own defaults stay untouched.
+_ALLOWED_GEN_KEYS = {
+    "num_beams", "do_sample", "top_p", "top_k", "temperature",
+    "length_penalty", "repetition_penalty", "max_mel_tokens",
+    "max_text_tokens_per_segment",
+}
+
 _ENGINE = None
 _ENGINE_INIT_LOCK = threading.Lock()
 _INFER_LOCK = threading.Lock()
@@ -87,7 +95,15 @@ def _read_cfg() -> dict:
         "refer_mode": int(raw.get("refer_mode", 1)),
         "device": device,
         "use_emo_text": bool(raw.get("use_emo_text", False)),
+        "generation": _generation_kwargs(raw.get("generation")),
     }
+
+
+def _generation_kwargs(raw) -> dict:
+    """Whitelist the few infer() knobs we allow config.yaml to override."""
+    if not hasattr(raw, "items"):
+        return {}
+    return {str(k): raw[k] for k in raw if str(k) in _ALLOWED_GEN_KEYS}
 
 
 def _resolve_lang(cfg_lang: str) -> str:
@@ -132,12 +148,49 @@ def _ensure_refers() -> None:
         _REFER_EXTRACTED = True
 
 
-def _resolve_reference(number, cfg: dict, allow_extract: bool = True) -> str:
+_VOICE_MAP_CACHE = None
+
+
+def reload_voice_map() -> None:
+    """Drop the per-process cache after the review UI edits voice_map.json.
+
+    Without this, saving an assignment would need a server restart before the
+    next synthesis picks it up. Cheap and safe: the next per-line lookup does
+    one verified read.
+    """
+    global _VOICE_MAP_CACHE
+    _VOICE_MAP_CACHE = None
+
+
+def _get_voice_map() -> dict:
+    """Load the per-video speaker contract ONCE per process.
+
+    ``load_voice_map`` parses an xlsx to verify the fingerprint, so caching
+    matters here (this function is on the per-line synthesis path). Building
+    the map is pure CPU and never touches the resident model, so it is safe
+    as a lazy fallback when step 9 was skipped.
+    """
+    global _VOICE_MAP_CACHE
+    if _VOICE_MAP_CACHE is None:
+        from core.tts_backend import voice_map as vm
+
+        if not os.path.isfile(vm.VOICE_MAP_FILE):
+            rprint("[yellow][voice_map] 契约缺失，正在从已有原声切片生成（纯 CPU）...[/yellow]")
+            vm.build_voice_map()
+        _VOICE_MAP_CACHE = vm.load_voice_map()
+    return _VOICE_MAP_CACHE
+
+
+def _resolve_reference(number, cfg: dict, allow_extract: bool = True,
+                       chunk_index: int | None = None) -> str:
     """Pick the speaker prompt wav from the ORIGINAL VIDEO's vocals.
 
     refer_mode 1 -> fixed voice file (the ONLY mode allowed to use it)
     refer_mode 2 -> first line of original vocals (refers/1.wav)
     refer_mode 3 -> per-line original vocals (refers/{number}.wav)
+    refer_mode 4 -> per-speaker reference from voice_map.json (stable per
+                    speaker; the producer/algorithm lives entirely in
+                    core/tts_backend/voice_map.py and can be replaced freely)
 
     Modes 2/3 NEVER fall back to the bundled voice_01.wav: silently using a
     preset speaker defeats the whole point of original-voice cloning. If a
@@ -156,12 +209,31 @@ def _resolve_reference(number, cfg: dict, allow_extract: bool = True) -> str:
             )
         return fixed
 
+    if mode == 4:
+        data = _get_voice_map()
+        key = str(number)
+        # A merged task row can hold several original subtitle lines, each
+        # synthesised as its own wav. Step 8.2/voice_map may have assigned a
+        # speaker per sub-line; prefer that over the whole-row label (FR-34).
+        speaker = None
+        if chunk_index is not None:
+            speaker = (data.get("chunk_speakers") or {}).get(key, {}).get(
+                str(chunk_index))
+        if speaker is None:
+            speaker = data["segments"].get(key)
+        if speaker is None:
+            raise KeyError(
+                f"voice_map.json 缺少第 {number} 句的说话人映射；任务表可能已重新切句，"
+                "请重跑流水线第 9 步生成新契约。"
+            )
+        return data["speakers"][speaker]["ref"]
+
     if mode == 2:
         chosen = global_ref
     elif mode == 3:
         chosen = os.path.join(_AUDIO_REFERS_DIR, f"{number}.wav")
     else:
-        raise ValueError(f"index_tts.refer_mode 只能是 1/2/3，当前值: {mode}")
+        raise ValueError(f"index_tts.refer_mode 只能是 1/2/3/4，当前值: {mode}")
 
     if not os.path.isfile(chosen) and allow_extract:
         _ensure_refers()
@@ -178,6 +250,41 @@ def _resolve_reference(number, cfg: dict, allow_extract: bool = True) -> str:
         " 请先在流水线第 9 步『提取参考音频』完成 Demucs 分离与切片，再生成配音。"
         " 原声模式不会回退到 spk_audio_prompt 预置音色。"
     )
+
+
+def synthesis_order(items) -> tuple[list[int], dict]:
+    """Reorder synthesis jobs so the same speaker prompt stays consecutive.
+
+    IndexTTS2 caches ``spk_cond_emb / s2mel_style / prompt_condition / mel``
+    keyed by ``spk_audio_prompt``. Every prompt switch throws those away,
+    re-runs w2v-bert + CAMPPlus + length_regulator and calls
+    ``torch.cuda.empty_cache()``. Step 10 used to walk subtitles in timeline
+    order, so a two-speaker interview switched hundreds of times.
+
+    Reordering is safe: output filenames are ``{number}_{line_index}.wav`` and
+    step 11 reads them back by number, never by creation order. Only
+    ``refer_mode=4`` has a small set of stable prompts; modes 2/3 have a
+    distinct prompt per line and gain nothing, so their order is untouched.
+    """
+    items = list(items)
+    cfg = _read_cfg()
+    if cfg["refer_mode"] != 4:
+        return list(range(len(items))), {"enabled": False}
+
+    keys = []
+    for number, chunk_index in items:
+        try:
+            keys.append(_resolve_reference(number, cfg, allow_extract=False,
+                                           chunk_index=chunk_index))
+        except Exception:  # noqa: BLE001 — one bad row must not block sorting
+            keys.append("")
+    before = sum(1 for i in range(1, len(keys)) if keys[i] != keys[i - 1])
+    # Stable sort keeps subtitle order inside each speaker group.
+    order = sorted(range(len(items)), key=lambda i: (keys[i] or "~", i))
+    after = sum(1 for i in range(1, len(order))
+                if keys[order[i]] != keys[order[i - 1]])
+    return order, {"enabled": True, "groups": len(set(keys)),
+                   "switches_before": before, "switches_after": after}
 
 
 def _get_engine(cfg: dict):
@@ -214,13 +321,18 @@ def _get_engine(cfg: dict):
     return _ENGINE
 
 
-def index_tts_for_videolingo(text, save_as, number=None, task_df=None) -> None:
-    """VideoLingo TTS adapter. Signature mirrors the other *_for_videolingo hooks."""
+def index_tts_for_videolingo(text, save_as, number=None, task_df=None,
+                             chunk_index=None) -> None:
+    """VideoLingo TTS adapter. Signature mirrors the other *_for_videolingo hooks.
+
+    ``chunk_index`` is the sub-line index inside a merged dubbing task; it is
+    only used by refer_mode=4 to pick a per-sub-line speaker (FR-34).
+    """
     global _VOICE_LOGGED
     cfg = _read_cfg()
     # Resolve reference BEFORE taking the infer lock: mode 2/3 may run Demucs
     # on its very first call, which should not block/serialize model init.
-    spk_prompt = _resolve_reference(number, cfg)
+    spk_prompt = _resolve_reference(number, cfg, chunk_index=chunk_index)
     lang = _resolve_lang(cfg["lang"])
 
     if not _VOICE_LOGGED:
@@ -243,6 +355,7 @@ def index_tts_for_videolingo(text, save_as, number=None, task_df=None) -> None:
             lang=lang,
             use_emo_text=cfg["use_emo_text"],
             verbose=False,
+            **cfg["generation"],
         )
 
     if not os.path.isfile(save_as) or os.path.getsize(save_as) < 1024:
@@ -259,8 +372,17 @@ def self_check() -> None:
     print(f"  use_bf16         : {cfg['use_bf16']}")
     print(f"  lang             : {cfg['lang']} -> {_resolve_lang(cfg['lang'])}")
     print(f"  refer_mode       : {cfg['refer_mode']}  "
-          f"({ {1: '固定音色', 2: '原声/第1句', 3: '原声/逐句'}.get(cfg['refer_mode'], '?') })")
+          f"({ {1: '固定音色', 2: '原声/第1句', 3: '原声/逐句', 4: '按人/voice_map'}.get(cfg['refer_mode'], '?') })")
     print(f"  spk_audio_prompt : {cfg['spk_audio_prompt']}  (仅 refer_mode=1 使用)")
+    if cfg["refer_mode"] == 4:
+        try:
+            from core.tts_backend import voice_map as vm
+            vm_data = vm.load_voice_map()
+            print(f"  voice_map        : {vm_data['n_speakers']} 人 | "
+                  f"sil={vm_data['silhouette']} | degraded={vm_data['degraded']} | "
+                  f"{os.path.abspath(vm.VOICE_MAP_FILE)}")
+        except Exception as e:
+            print(f"  voice_map        : 尚未生成 → {type(e).__name__}: {e}")
     try:
         # allow_extract=False: self_check must stay cheap and must NOT kick off
         # a 2.5-minute Demucs run just because refers/ is empty.

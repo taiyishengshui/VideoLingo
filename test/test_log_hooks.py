@@ -123,6 +123,24 @@ def test_startup_registers_sink_so_http_thread_log_reaches_bus(monkeypatch, tmp_
         encoding="utf-8")
 
 
+def test_startup_backfill_failure_does_not_block_app(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    from server.app import create_app
+    import server.logbus as lb
+    from core.services import timing_service
+
+    monkeypatch.setattr(lb, "LOG_DIR", str(tmp_path / "log"))
+
+    def fail_backfill():
+        raise OSError("timing store unavailable")
+
+    monkeypatch.setattr(timing_service, "backfill", fail_backfill)
+    with TestClient(create_app()) as client:
+        response = client.get("/api/version")
+
+    assert response.status_code == 200
+
+
 def test_task_thread_capture_publishes_exactly_once(monkeypatch, tmp_path):
     """任务线程：print 走 _StreamCapture，emit 必须跳过，否则页面日志翻倍。"""
     from server.logbus import BUS, publish_external

@@ -174,7 +174,7 @@ def read_transcript(workspace="output") -> tuple[list[dict], str, str]:
             pass
     raise ValueError(
         "没有可用的带时间戳字幕：广告位识别需要 output/trans.srt（中文译文，"
-        "请先跑到第 6 步「对齐字幕」）或 output/src.srt。")
+        "请先跑到第 6 步「生成字幕」）或 output/src.srt。")
 
 
 def _fmt_clock(sec, ms=False):

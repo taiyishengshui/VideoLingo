@@ -67,11 +67,11 @@ def test_reversed_range_is_rejected():
 
 
 def test_audio_only_clamps_end_to_last_available_step():
-    """merge_sub 是 needs_video，音频输入时不存在 → 只能收敛到 align。"""
+    """merge_sub 是 needs_video，音频输入时不存在 → 收敛到它前一步 gen_sub。"""
     ids = run_service.resolve_steps(None, "transcribe", audio_only=True,
                                    to_step="merge_sub")
     assert "merge_sub" not in ids
-    assert ids[-1] == "align"
+    assert ids[-1] == "gen_sub"
 
 
 def test_audio_only_rejects_a_from_step_that_was_filtered_out():
@@ -88,7 +88,7 @@ def test_default_range_follows_burn_switch(cfg_path):
         "from_step": "transcribe", "to_step": "merge_sub"}
     cfg_path(BURN_OFF)
     assert run_service.default_run_range() == {
-        "from_step": "transcribe", "to_step": "align"}
+        "from_step": "transcribe", "to_step": "gen_sub"}
 
 
 def test_burn_switch_is_read_fresh_without_restart(cfg_path):
@@ -108,4 +108,4 @@ def test_missing_burn_key_falls_back_to_project_default(cfg_path):
 def test_default_range_for_audio_only_never_points_at_a_video_step(cfg_path):
     cfg_path(BURN_ON)
     assert run_service.default_run_range(audio_only=True) == {
-        "from_step": "transcribe", "to_step": "align"}
+        "from_step": "transcribe", "to_step": "gen_sub"}

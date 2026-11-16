@@ -13,8 +13,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from core.services.bili_meta_service import (
-    generate_bili_meta, load_transcript, load_video_context,
-    suggest_speaker, transcript_brief)
+    generate_bili_meta, load_saved_bili_meta, load_transcript,
+    load_video_context, suggest_speaker, transcript_brief)
 
 router = APIRouter(prefix="/api/bili", tags=["bili"])
 
@@ -26,12 +26,15 @@ def bili_context():
     """卡片预填：转录状态（决定性一手素材）+ 原视频信息（次要参考）。
 
     转录只回统计、不回全文，避免把几万字塞进一次页面请求。
+    `existing` 是上次落盘的三件套（FR-27 v1.37），供刷新后回显；无文件 /
+    格式损坏时为 None，纯只读零 LLM 费用。
     """
     ctx = load_video_context(_SAVE_PATH)
     tr = load_transcript(_SAVE_PATH)
     return {**ctx, "speaker_suggest": suggest_speaker(ctx, tr["text"]),
             "meta_file": os.path.join(_SAVE_PATH, "video_meta.json"),
-            "transcript": transcript_brief(tr)}
+            "transcript": transcript_brief(tr),
+            "existing": load_saved_bili_meta(_SAVE_PATH)}
 
 
 class GenerateRequest(BaseModel):

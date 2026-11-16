@@ -42,8 +42,26 @@ export interface TermCatalog {
   }
 }
 
+/** history/<视频名>/log/terminology.json —— 归档时的完整任务术语表 */
+export interface HistoryTermSource {
+  id: string; name: string; path: string; count: number
+  theme: string; mtime: number; available: boolean
+}
+export interface HistoryImportOrigin {
+  name: string; src: string; tgt: string; note: string
+}
+export interface HistoryImportRow {
+  key: string; src: string; tgt: string; note: string
+  origins: HistoryImportOrigin[]; conflict: boolean; duplicated: boolean
+}
+export interface HistoryImportPreview {
+  sources: { name: string; count: number; theme: string }[]
+  rows: HistoryImportRow[]
+  stats: { files: number; entries: number; unique: number; conflicts: number; duplicates: number }
+}
 export interface TermSetsResponse {
   sets: TermSetInfo[]; active: string[]; job: JobTermsReview; catalog: TermCatalog
+  history?: HistoryTermSource[]   // 旧后端无此字段时前端兜底为空
 }
 
 export async function getTermSets(): Promise<TermSetsResponse> {
@@ -94,6 +112,30 @@ export async function writeBackTerms(body: {
     body: JSON.stringify(body),
   })
   if (!r.ok) throw new Error(errDetail(await r.json().catch(() => ({}))) || '回写失败')
+  return r.json()
+}
+
+// ---------------- 从历史归档导入基础库 ----------------
+
+/** 只读预览：选中的历史术语表按 src 去重（后者覆盖），标出冲突与来源。 */
+export async function previewHistoryImport(names: string[]): Promise<HistoryImportPreview> {
+  const r = await fetch('/api/translate/terms/history/preview', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ names }),
+  })
+  if (!r.ok) throw new Error(errDetail(await r.json().catch(() => ({}))) || '预览失败')
+  return r.json()
+}
+
+/** 只写 terms/*.json；srcs 仅传 key，译文由服务端从历史文件重读。 */
+export async function importHistoryTerms(body: {
+  target: string; names: string[]; srcs: string[]; overwrite?: boolean; desc?: string
+}): Promise<WriteBackResult> {
+  const r = await fetch('/api/translate/terms/history/import', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!r.ok) throw new Error(errDetail(await r.json().catch(() => ({}))) || '导入失败')
   return r.json()
 }
 

@@ -4,7 +4,7 @@ import {
   Row, Space, Spin, Table, Tabs, Tag, Typography, Input, Progress, Select,
   Tooltip, message,
 } from 'antd'
-import { PlusOutlined, ReloadOutlined, ExperimentOutlined, StopOutlined, SafetyOutlined, RedoOutlined, ImportOutlined } from '@ant-design/icons'
+import { PlusOutlined, ReloadOutlined, ExperimentOutlined, StopOutlined, SafetyOutlined, RedoOutlined, ImportOutlined, HistoryOutlined } from '@ant-design/icons'
 import {
   type LanguageDefaults, type PromptInfo, type ProbeResult, type Term, type TermSetInfo,
   type JobTermsReview, type CallLogEntry, type VerifyResult, getCallLog, getPrompts,
@@ -12,6 +12,8 @@ import {
   saveTermSet, setActiveTermSets, deleteTermSet, previewPrompt, verifyTranslation,
   writeBackTerms, type PreviewResult,
   type TermCatalog, type TermCatalogRow, type TermSource, type TermVariant,
+  type HistoryTermSource, type HistoryImportPreview, type HistoryImportRow,
+  type HistoryImportOrigin, previewHistoryImport, importHistoryTerms,
 } from '../translateApi'
 
 const { TextArea } = Input
@@ -67,6 +69,22 @@ function TermsTab() {
   const [wbExisting, setWbExisting] = useState<Set<string>>(new Set())
   const [wbSelected, setWbSelected] = useState<string[]>([])
   const [wbBusy, setWbBusy] = useState(false)
+
+  // ---------- 从历史归档导入基础库 ----------
+  const [histOpen, setHistOpen] = useState(false)
+  const [histSources, setHistSources] = useState<HistoryTermSource[]>([])
+  const [histPicked, setHistPicked] = useState<string[]>([])
+  const [histPreview, setHistPreview] = useState<HistoryImportPreview | null>(null)
+  const [histLoading, setHistLoading] = useState(false)
+  const [histSelected, setHistSelected] = useState<string[]>([])
+  const [histTarget, setHistTarget] = useState('__new__')
+  const [histNewName, setHistNewName] = useState('')
+  const [histOverwrite, setHistOverwrite] = useState(false)
+  const [histExisting, setHistExisting] = useState<Set<string>>(new Set())
+  const [histBusy, setHistBusy] = useState(false)
+  const [histQuery, setHistQuery] = useState('')
+  const histTargetName = histTarget === '__new__' ? histNewName.trim() : histTarget
+
   const plate = useMemo(() => new Set(job?.plate_srcs ?? []), [job])
   const sources = catalog.sources ?? []
   const baseSources = useMemo(
@@ -88,6 +106,7 @@ function TermsTab() {
       const d = await getTermSets()
       setSets(d.sets); setActive(d.active); setJob(d.job)
       setCatalog(d.catalog ?? EMPTY_CATALOG)
+      setHistSources(d.history ?? [])
       // 库被删后当前筛选 / 来源页签可能指向已不存在的库，回落到默认
       setTermSet((cur) => cur !== '__all__' && cur !== '__job__'
         && !d.sets.some((s) => s.name === cur) ? '__all__' : cur)
@@ -173,6 +192,96 @@ function TermsTab() {
       setWbOpen(false); reload()
     } catch (e) { msgApi.error(String(e)) } finally { setWbBusy(false) }
   }
+
+  // 选择的历史文件夹变化时重算去重预览（纯后端决策，前端不自己合并）
+  useEffect(() => {
+    if (!histOpen) return
+    if (!histPicked.length) { setHistPreview(null); setHistSelected([]); return }
+    let cancelled = false
+    setHistLoading(true)
+    previewHistoryImport(histPicked)
+      .then((p) => {
+        if (cancelled) return
+        setHistPreview(p)
+        setHistSelected(p.rows.map((r) => r.key))
+      })
+      .catch((e) => { if (!cancelled) msgApi.error(String(e)) })
+      .finally(() => { if (!cancelled) setHistLoading(false) })
+    return () => { cancelled = true }
+  }, [histOpen, histPicked, msgApi])
+
+  // 目标库已有 src：预览表格标「已存在·跳过」
+  useEffect(() => {
+    if (!histOpen || !histTargetName || !sets.some((s) => s.name === histTargetName)) {
+      setHistExisting(new Set()); return
+    }
+    let cancelled = false
+    getTermSet(histTargetName).then((d) => {
+      if (!cancelled) setHistExisting(new Set(
+        (d.terms || []).map((t) => t.src.trim().toLowerCase())))
+    }).catch(() => { if (!cancelled) setHistExisting(new Set()) })
+    return () => { cancelled = true }
+  }, [histOpen, histTargetName, sets])
+
+  const openHistory = () => {
+    setHistPicked([]); setHistPreview(null); setHistSelected([])
+    setHistTarget('__new__'); setHistNewName(''); setHistOverwrite(false)
+    setHistQuery(''); setHistExisting(new Set()); setHistOpen(true)
+  }
+
+  const doHistoryImport = async () => {
+    if (!histTargetName) { msgApi.error('请选择或填写目标术语库'); return }
+    if (!histPicked.length) { msgApi.error('请至少选择一个历史记录'); return }
+    if (!histSelected.length) { msgApi.error('请勾选至少一条术语'); return }
+    setHistBusy(true)
+    try {
+      const r = await importHistoryTerms({
+        target: histTargetName, names: histPicked, srcs: histSelected,
+        overwrite: histOverwrite,
+      })
+      msgApi.success(`已导入 ${r.added} 条到 ${r.target}`
+        + `${r.updated ? `，更新 ${r.updated} 条` : ''}`
+        + `${r.skipped ? `，跳过 ${r.skipped} 条已存在` : ''}`)
+      setHistOpen(false); reload()
+    } catch (e) { msgApi.error(String(e)) } finally { setHistBusy(false) }
+  }
+
+  const histRows = useMemo(() => {
+    const q = histQuery.trim().toLowerCase()
+    const rows = histPreview?.rows ?? []
+    return q ? rows.filter((r) => [r.src, r.tgt, r.note,
+      ...(r.origins ?? []).map((o) => o.name)]
+      .some((v) => String(v).toLowerCase().includes(q))) : rows
+  }, [histPreview, histQuery])
+
+  const histSourceColumns = [
+    { title: '历史任务（视频名）', dataIndex: 'name', ellipsis: true,
+      render: (v: string) => <Tooltip title={v}><Text strong>{v}</Text></Tooltip> },
+    { title: '条数', dataIndex: 'count', width: 72 },
+    { title: '主题', dataIndex: 'theme', ellipsis: true,
+      render: (v: string) => <Text type="secondary">{v || '—'}</Text> },
+    { title: '归档日期', dataIndex: 'mtime', width: 108,
+      render: (v: number) => v ? new Date(v * 1000).toLocaleDateString('zh-CN') : '—' },
+    { title: '状态', width: 78, render: (_: unknown, r: HistoryTermSource) =>
+      r.available ? <Tag color="green">可读</Tag> : <Tag color="red">损坏</Tag> },
+  ]
+
+  const histRowColumns = [
+    { title: '原文 src', dataIndex: 'src', width: '22%',
+      render: (v: string, r: HistoryImportRow) => <Space size={4} wrap>
+        <Text strong>{v}</Text>
+        {r.conflict && <Tooltip title="多个历史任务里译文不一致，展开可逐期对照；默认按选择顺序后者覆盖">
+          <Tag color="orange">译文冲突</Tag></Tooltip>}
+        {r.duplicated && <Tag color="blue">{r.origins.length} 期都有</Tag>}
+      </Space> },
+    { title: '译文 tgt', dataIndex: 'tgt', width: '22%', ellipsis: true },
+    { title: '备注 note', dataIndex: 'note', ellipsis: true },
+    { title: '目标库', width: 116, render: (_: unknown, r: HistoryImportRow) =>
+      histExisting.has(r.key)
+        ? <Tag color={histOverwrite ? 'orange' : 'default'}>
+          {histOverwrite ? '将被覆盖' : '已存在·跳过'}</Tag>
+        : <Tag color="green">可写入</Tag> },
+  ]
 
   const wbColumns = [
     { title: '原文 src', dataIndex: 'src', width: '24%' },
@@ -310,6 +419,7 @@ function TermsTab() {
           {showAll ? '收起全部术语' : '查看全部术语'}
         </Button>
         <Button icon={<ImportOutlined />} onClick={() => openWriteBack()}>从任务术语表回写</Button>
+        <Button icon={<HistoryOutlined />} onClick={openHistory}>从历史导入</Button>
         <Button icon={<ReloadOutlined />} onClick={reload} />
         <Button icon={<PlusOutlined />} onClick={() => {
           setEditing(''); setEditName(''); setEditDesc(''); setTerms([])
@@ -514,6 +624,79 @@ function TermsTab() {
             rowSelection={{ selectedRowKeys: wbSelected,
               onChange: (keys) => setWbSelected(keys.map(String)) }} />
           <Text type="secondary">已勾选 {wbSelected.length} 条 · 默认只勾「4.1 新抽」，来自底板的词条通常无需重复入库</Text>
+        </Space>
+      </Modal>
+
+      <Modal title="从历史归档导入术语" open={histOpen} width={1080}
+        onCancel={() => setHistOpen(false)} onOk={doHistoryImport}
+        confirmLoading={histBusy} okText="导入到基础库" cancelText="取消"
+        okButtonProps={{ disabled: !histPicked.length || !histSelected.length }}>
+        <Space direction="vertical" style={{ width: '100%' }} size="middle">
+          <Alert type="warning" showIcon message="只写 terms/*.json，零费用"
+            description="读取 history/<视频名>/log/terminology.json（当期完整术语表），按 src 去重后写入你指定的基础库。不改 output/、不动断点与 GPT 缓存、不修改历史归档；目标库已有词条默认跳过（保留人工译文）。导入到已有库是追加合并，不会替换现有词条；勾选该库并重跑 4.1 才生效。" />
+          <div>
+            <Space wrap style={{ marginBottom: 8 }}>
+              <Text strong>① 选择历史任务（可多选）</Text>
+              <Button size="small" onClick={() => setHistPicked(
+                histSources.filter((s) => s.available).map((s) => s.id))}>全选可读</Button>
+              <Button size="small" onClick={() => setHistPicked([])}>清空</Button>
+              <Text type="secondary">共 {histSources.length} 期 · 已选 {histPicked.length} 期</Text>
+            </Space>
+            <Table<HistoryTermSource> rowKey="id" size="small" dataSource={histSources}
+              columns={histSourceColumns} scroll={{ y: 190 }}
+              pagination={{ pageSize: 5, showSizeChanger: false }}
+              rowSelection={{ selectedRowKeys: histPicked,
+                onChange: (keys) => setHistPicked(keys.map(String)),
+                getCheckboxProps: (r) => ({ disabled: !r.available }) }} />
+          </div>
+          <div>
+            <Space wrap style={{ marginBottom: 8 }}>
+              <Text strong>② 去重预览与勾选</Text>
+              {histPreview && <>
+                <Tag>原始 {histPreview.stats.entries} 条</Tag>
+                <Tag color="blue">去重后 {histPreview.stats.unique} 条</Tag>
+                <Tag color="orange">译文冲突 {histPreview.stats.conflicts} 条</Tag>
+                <Tag>已勾 {histSelected.length} 条</Tag>
+              </>}
+              <Button size="small" disabled={!histPreview} onClick={() => setHistSelected(
+                (histPreview?.rows ?? []).filter((r) => !histExisting.has(r.key)).map((r) => r.key))}>
+                只选未收录</Button>
+              <Button size="small" disabled={!histPreview} onClick={() => setHistSelected(
+                (histPreview?.rows ?? []).map((r) => r.key))}>全选</Button>
+              <Input.Search allowClear size="small" style={{ width: 210 }} value={histQuery}
+                onChange={(e) => setHistQuery(e.target.value)} placeholder="搜 原文 / 译文 / 期名" />
+            </Space>
+            <Spin spinning={histLoading}>
+              <Table<HistoryImportRow> rowKey="key" size="small" dataSource={histRows}
+                columns={histRowColumns} scroll={{ y: 260 }}
+                pagination={{ pageSize: 10, showSizeChanger: false,
+                  showTotal: (t) => `共 ${t} 条` }}
+                rowSelection={{ selectedRowKeys: histSelected,
+                  onChange: (keys) => setHistSelected(keys.map(String)) }}
+                expandable={{ expandedRowRender: (r) =>
+                  <Table<HistoryImportOrigin> rowKey={(o) => `${o.name}:${o.src}`}
+                    size="small" pagination={false} dataSource={r.origins}
+                    columns={[
+                      { title: '历史任务', dataIndex: 'name', width: '40%', ellipsis: true },
+                      { title: '译文', dataIndex: 'tgt', width: '30%', ellipsis: true },
+                      { title: '备注', dataIndex: 'note', ellipsis: true },
+                    ]} /> }} />
+            </Spin>
+            <Text type="secondary">多个历史任务都有同一个词时按列表顺序「后者覆盖」；冲突行可展开逐期对照。</Text>
+          </div>
+          <Space wrap>
+            <Text strong>③ 目标基础库</Text>
+            <Select style={{ width: 240 }} value={histTarget} onChange={setHistTarget}
+              options={[...sets.map((s) => ({ label: s.name, value: s.name })),
+                { label: '＋ 新建术语库…', value: '__new__' }]} />
+            {histTarget === '__new__' && <Input style={{ width: 240 }} value={histNewName}
+              onChange={(e) => setHistNewName(e.target.value)}
+              placeholder="新库名（按主题分类，如 AI / 亲密关系）" />}
+            <Checkbox checked={histOverwrite}
+              onChange={(e) => setHistOverwrite(e.target.checked)}>
+              用历史译文覆盖已有词条
+            </Checkbox>
+          </Space>
         </Space>
       </Modal>
     </Card>

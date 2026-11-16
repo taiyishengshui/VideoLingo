@@ -1,11 +1,17 @@
 export interface StepStatus {
   id: string
+  no: number               // 全局固定序号，与源码 _2…_12 一致（音频模式也不变）
   title: string
   stage: 'sub' | 'dub'
   done: boolean
   markers: string[]
   logs: string[]
   llm_titles: string[]
+  last_seconds?: number | null  // 上一次实跑耗时（timing_service，秒）
+  last_status?: string | null
+  last_started_at?: string | null  // 上一次实跑开始时间（timing_service，YYYY-MM-DD HH:MM:SS）
+  last_ended_at?: string | null    // 上一次实跑结束时间
+  run_count?: number
 }
 
 export type TaskState = 'idle' | 'running' | 'paused' | 'stopped' | 'completed' | 'error'
@@ -21,6 +27,8 @@ export interface PipelineStatus {
   queue: string[]
   current_step: string | null
   error: string
+  failed_step: string | null   // 崩溃时具体失败的步骤 id（v1.32）
+  stopped_step: string | null  // 用户中止时具体步骤 id（v1.32）
   steps: StepStatus[]
   log_file?: string | null   // 本次运行的落盘日志（相对项目根）
   defaults?: RunRange
@@ -44,6 +52,31 @@ export async function tailLog(path: string, lines = 20000): Promise<string[]> {
 export async function getPipeline(): Promise<PipelineStatus> {
   const r = await fetch('/api/pipeline')
   if (!r.ok) throw new Error(`GET /api/pipeline ${r.status}`)
+  return r.json()
+}
+
+export interface StepTiming {
+  id: string
+  no: number
+  title: string
+  last: number
+  last_status: string
+  best: number
+  count: number
+  total: number
+}
+
+export interface TimingsReport {
+  by_step: Record<string, StepTiming>
+  updated_at: string
+  runs: number
+  report: string
+  dub: Record<string, number | string | null>
+}
+
+export async function getTimings(): Promise<TimingsReport> {
+  const r = await fetch('/api/pipeline/timings')
+  if (!r.ok) throw new Error(`GET /api/pipeline/timings ${r.status}`)
   return r.json()
 }
 
@@ -182,6 +215,8 @@ export interface BiliContext {
   speaker_suggest: string
   meta_file: string
   transcript: BiliTranscript
+  /** 当前 output/bili_meta.md 里上次生成的三件套；无文件或损坏则 null（FR-27 刷新回显） */
+  existing: BiliMetaResult | null
 }
 
 export interface BiliMetaResult {
@@ -192,6 +227,8 @@ export interface BiliMetaResult {
   speaker: string
   video_title: string
   saved_to: string
+  /** 仅回显结果带：md 里记的生成时间 */
+  generated_at?: string
   transcript?: BiliTranscript
 }
 

@@ -111,16 +111,21 @@ STEPS: tuple = (
         id="align",
         title="对齐字幕",
         stage="sub",
-        calls=(
-            ("core._5_split_sub", "split_for_sub_main"),
-            ("core._6_gen_sub", "align_timestamp_main"),
-        ),
-        # the two intermediate xlsx from _5 are regenerated each run; include
-        # them so a rerun doesn't leave stale tables next to fresh srt files
-        markers=("output/src.srt", "output/trans.srt",
-                 "output/log/translation_results_for_subtitles.xlsx",
+        calls=(("core._5_split_sub", "split_for_sub_main"),),
+        # 第 5 步只做 LLM 对齐切分；两张中间 xlsx 是它自己的产物，
+        # 不能算进第 6 步的完成判据，否则单独重跑「生成字幕」会被误判为已完成。
+        markers=("output/log/translation_results_for_subtitles.xlsx",
                  "output/log/translation_results_remerged.xlsx"),
         llm_titles=("align_subs",),
+    ),
+    Step(
+        id="gen_sub",
+        title="生成字幕",
+        stage="sub",
+        calls=(("core._6_gen_sub", "align_timestamp_main"),),
+        # 生成 srt 是纯本地计算、零 LLM 费用。单独重跑它不必重跑第 5 步，
+        # 这就是把它从 align 里拆出来的全部理由（PRD FR-21 / v1.26）。
+        markers=("output/src.srt", "output/trans.srt"),
     ),
     Step(
         id="merge_sub",
@@ -174,6 +179,10 @@ STEPS: tuple = (
 )
 
 _BY_ID = {s.id: s for s in STEPS}
+# 全局固定序号：与源码文件编号 _2…_12 对齐（第 10 步 = _10_gen_audio）。
+# 不能用 audio_only 过滤后的下标，否则纯音频输入时序号会整体前移，
+# 页面上的「第 N 步」和文档/口头的说法就对不上了（FR-21 / v1.26）。
+STEP_NO = {s.id: i for i, s in enumerate(STEPS, 1)}
 
 
 def get_step(step_id: str) -> Step:
@@ -196,6 +205,7 @@ def pipeline_status(audio_only: bool = False) -> list:
     return [
         {
             "id": s.id,
+            "no": STEP_NO[s.id],
             "title": s.title,
             "stage": s.stage,
             "done": s.is_done(),

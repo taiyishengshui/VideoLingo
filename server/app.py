@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +31,7 @@ from server.input_api import router as input_router
 from server.history_api import router as history_router
 from server.bili_api import router as bili_router
 from server.ad_api import router as ad_router
+from server.voice_api import router as voice_router
 from version import __version__
 
 # server/app.py lives at <root>/server/app.py -> project root is 2 dirs up
@@ -84,24 +86,37 @@ class RunRequest(BaseModel):
                                     # so guarded steps actually rerun
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup diagnostics: bind the event loop, register the unified log
+    sink, and backfill historical step timings. Failures here must never
+    block the app from serving (FR-31 / timing-service resilience)."""
+    BUS.bind_loop(asyncio.get_running_loop())
+    # FR-31：卡片类同步操作（裁剪 / 识别广告位 / B站文案）不在任务
+    # 线程里，print 只会落 cmd。把统一出口注册上，它们的日志同样进
+    # 页面实时日志 + pipeline_latest.log。注册是幂等的。
+    from core.utils.log_hooks import register, rprint
+    register(publish_external)
+    install_disconnect_noise_filter(asyncio.get_running_loop())
+    try:
+        from core.services import timing_service
+        added = timing_service.backfill()
+        if added:
+            rprint(f"[green]已从历史流水线日志补录 {added} 条步骤耗时[/green]")
+    except Exception as exc:  # noqa: BLE001 — diagnostics must not block startup
+        rprint(f"[yellow]⚠️ 历史步骤耗时回填失败：{exc}[/yellow]")
+    yield
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="VideoLingo", docs_url=None, redoc_url=None)
+    app = FastAPI(title="VideoLingo", docs_url=None, redoc_url=None,
+                  lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    @app.on_event("startup")
-    async def _startup():
-        BUS.bind_loop(asyncio.get_running_loop())
-        # FR-31：卡片类同步操作（裁剪 / 识别广告位 / B站文案）不在任务
-        # 线程里，print 只会落 cmd。把统一出口注册上，它们的日志同样进
-        # 页面实时日志 + pipeline_latest.log。注册是幂等的。
-        from core.utils.log_hooks import register
-        register(publish_external)
-        install_disconnect_noise_filter(asyncio.get_running_loop())
 
     @app.get("/api/version")
     def get_version():
@@ -112,12 +127,23 @@ def create_app() -> FastAPI:
     @app.get("/api/pipeline")
     def get_pipeline():
         from core.services.run_service import default_run_range
+        from core.services import timing_service
         audio_only = _audio_only()
+        steps = timing_service.attach_last_seconds(
+            pipeline_status(audio_only=audio_only))
         return {**MANAGER.snapshot(),
-                "steps": pipeline_status(audio_only=audio_only),
+                "steps": steps,
                 # 两个步骤下拉的默认值由服务层算（结束步骤跟随烧录开关）
                 "defaults": default_run_range(audio_only=audio_only),
                 "version": __version__}
+
+    @app.get("/api/pipeline/timings")
+    def get_pipeline_timings():
+        """Read-only step timing report (history + step-10 breakdown)."""
+        from core.services import timing_service
+        return {**timing_service.summary(),
+                "report": timing_service.format_report(),
+                "dub": timing_service.latest_breakdown()}
 
     @app.post("/api/pipeline/run")
     def run_pipeline(req: RunRequest):
@@ -182,6 +208,7 @@ def create_app() -> FastAPI:
     app.include_router(history_router)
     app.include_router(bili_router)
     app.include_router(ad_router)
+    app.include_router(voice_router)
 
     # ---------------- per-step log files (whitelist: output/ only) ----------------
 

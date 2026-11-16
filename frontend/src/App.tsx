@@ -3,20 +3,21 @@ import { Layout, Menu, Typography, Button, Tooltip, Modal } from 'antd'
 import {
   PlaySquareOutlined, RobotOutlined, FolderOpenOutlined,
   SettingOutlined, AppstoreOutlined, BookOutlined, ReloadOutlined,
-  PoweroffOutlined,
+  PoweroffOutlined, SoundOutlined,
 } from '@ant-design/icons'
 import { getVersion } from './api'
 import PipelinePage from './pages/PipelinePage'
 import BatchPage from './pages/BatchPage'
 import ModelsPage from './pages/ModelsPage'
 import ArtifactsPage from './pages/ArtifactsPage'
+import VoiceMapPage from './pages/VoiceMapPage'
 import SettingsPage from './pages/SettingsPage'
 import TermsPromptsPage from './pages/TermsPromptsPage'
 
 const { Header, Content } = Layout
 
-type PageKey = 'pipeline' | 'batch' | 'models' | 'terms' | 'artifacts' | 'settings'
-const PAGE_KEYS: PageKey[] = ['pipeline', 'batch', 'models', 'terms', 'artifacts', 'settings']
+type PageKey = 'pipeline' | 'batch' | 'models' | 'terms' | 'artifacts' | 'voices' | 'settings'
+const PAGE_KEYS: PageKey[] = ['pipeline', 'batch', 'models', 'terms', 'artifacts', 'voices', 'settings']
 
 // page state lives in the URL hash (#/models, sub-routes like #/terms/prompts
 // keep the "terms" page active) — refresh / shareable
@@ -126,6 +127,7 @@ export default function App() {
             { key: 'models', icon: <RobotOutlined />, label: '模型' },
             { key: 'terms', icon: <BookOutlined />, label: '术语 & 提示词' },
             { key: 'artifacts', icon: <FolderOpenOutlined />, label: '产物' },
+            { key: 'voices', icon: <SoundOutlined />, label: '配音分配' },
             { key: 'settings', icon: <SettingOutlined />, label: '设置' },
           ]}
         />
@@ -144,6 +146,7 @@ export default function App() {
         {page === 'models' && <ModelsPage />}
         {page === 'terms' && <TermsPromptsPage />}
         {page === 'artifacts' && <ArtifactsPage />}
+        {page === 'voices' && <VoiceMapPage />}
         {page === 'settings' && <SettingsPage />}
       </Content>
     </Layout>

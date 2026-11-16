@@ -24,7 +24,8 @@ import traceback
 from collections.abc import Callable
 from datetime import datetime
 
-from core.pipeline import get_step, get_steps
+from core.pipeline import get_step, get_steps, STEP_NO
+from core.services import timing_service
 from core.st_utils.task_runner import TaskRunner, StopTask
 from server.logbus import BUS, LOG_FILE_LOCK, append_log_file
 from server import logbus as _logbus   # 动态取 LOG_DIR，测试只需 patch 一处
@@ -123,6 +124,10 @@ class TaskManager:
         self.queue: list[str] = []
         self.current_step: str | None = None
         self.error: str = ""
+        # 终态定位：崩溃/中止时记录具体是哪一步，前端据此显示「失败/已停止」，
+        # 否则 failed_step 被清空后前端无从区分「未运行」与「真的失败了」（v1.32）
+        self.failed_step: str | None = None
+        self.stopped_step: str | None = None
         self._lock = threading.RLock()   # reentrant: start() validates then delegates to _start()
         # attribute names MUST match what TaskRunner.check_cancel() reads
         self._pause_event = threading.Event()
@@ -170,6 +175,8 @@ class TaskManager:
             self.queue = [ident for _, ident, _ in jobs]
             self.current_step = None
             self.error = ""
+            self.failed_step = None
+            self.stopped_step = None
             self.state = "running"
             self._pause_event.set()
             self._stop_event.clear()
@@ -203,6 +210,8 @@ class TaskManager:
             "queue": list(self.queue),
             "current_step": self.current_step,
             "error": self.error,
+            "failed_step": self.failed_step,
+            "stopped_step": self.stopped_step,
             "log_file": latest_log_relpath(),   # 让前端能直接找到本次日志
         }
 
@@ -241,16 +250,38 @@ class TaskManager:
                 if kind == "step":
                     step = get_step(ident)
                     title, runner = step.title, step.run
+                    step_no = STEP_NO[ident]
                 else:  # "job" — one-off work outside the step registry
                     title, runner = str(ident), fn
+                    step_no = 0
                 self.current_step = ident
+                t0 = time.perf_counter()
                 self._write_log(f"--- 步骤开始：{title} ({ident})")
                 BUS.publish({"type": "step_start", "id": ident, "title": title})
+                step_status = "ok"
                 try:
                     runner()
                 except StopTask:
+                    step_status = "stopped"
+                    self.stopped_step = ident
                     self.state = "stopped"
                     break
+                except BaseException:
+                    step_status = "error"
+                    self.failed_step = ident
+                    raise
+                finally:
+                    # 结构化耗时：日志给人和 backfill 读，json 给页面读。
+                    # 计时本身绝不能影响流水线成败。
+                    elapsed = time.perf_counter() - t0
+                    try:
+                        self._write_log(
+                            f"--- 步骤结束：{title} ({ident}) "
+                            f"耗时 {elapsed:.1f}s 状态={step_status}")
+                        timing_service.record(ident, title, elapsed,
+                                              step_status, step_no)
+                    except Exception:  # noqa: BLE001
+                        pass
                 if self._stop_event.is_set():
                     self.state = "stopped"
                     break

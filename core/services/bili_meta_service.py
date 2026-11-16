@@ -373,6 +373,69 @@ def _render_md(result, ep_tag, speaker, video_title, tr) -> str:
     return "\n".join(lines)
 
 
+def load_saved_bili_meta(workspace="output") -> dict | None:
+    """读已落盘的 `bili_meta.md` → 结构化三件套（与 `_render_md` 配对的唯一解析）。
+
+    FR-27 v1.37：刷新页面后前端靠 `GET /api/bili/context` 的 `existing` 回显
+    上次结果。**md 是唯一真相源** —— 不另写 JSON、不塞 localStorage；归档把
+    md 搬进 history/ 后这里自然读不到，正是「新视频不显示旧文案」的正确行为。
+
+    文件不存在 / 编码坏 / 段落缺失 / 公式校验不过一律返回 `None`：用户手改坏
+    一个 md 不能让 `/context` 500，更不能把半截文案当成成功结果回显。
+    """
+    path = os.path.join(workspace, OUTPUT_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (OSError, UnicodeError):
+        return None
+
+    prefix = "# B站投稿文案（"
+    if not lines or not lines[0].startswith(prefix):
+        return None
+    head = lines[0][len(prefix):].rstrip("）")
+    if "｜" not in head:
+        return None
+    ep_tag, speaker = (s.strip() for s in head.rsplit("｜", 1))
+    if not re.fullmatch(r"EP\d{3}", ep_tag) or not speaker:
+        return None
+
+    def _section(name):
+        """取 `## name` 到下一个 `## ` 之间的原始行；缺节返回 None。"""
+        try:
+            start = lines.index("## " + name)
+        except ValueError:
+            return None
+        end = next((i for i in range(start + 1, len(lines))
+                    if lines[i].startswith("## ")), len(lines))
+        return lines[start + 1:end]
+
+    title_rows, desc_rows, tag_rows = (_section("标题候选"), _section("简介"),
+                                       _section("标签"))
+    if title_rows is None or desc_rows is None or tag_rows is None:
+        return None
+
+    titles = [m.group(1).strip() for row in title_rows
+              if (m := re.match(r"^\s*\d+\.\s+(.+?)\s*$", row))]
+    desc = "\n".join(desc_rows).strip()
+    tags = [t.strip() for row in tag_rows if row.strip()
+            for t in row.split("，") if t.strip()]
+    result = {"titles": titles, "desc": desc, "tags": tags}
+    # 唯一校验仍是 _valid_bili_meta：回显与生成走同一套公式硬红线
+    if _valid_bili_meta(result, ep_tag)["status"] != "success":
+        return None
+
+    video_title, generated_at = "", ""
+    for row in lines:
+        if row.startswith("> 原视频信息（仅参考，不主导选题）："):
+            video_title = row.split("：", 1)[-1].strip()
+        elif row.startswith("> 生成时间："):
+            generated_at = row.split("：", 1)[-1].split("（", 1)[0].strip()
+    return {**result, "ep_tag": ep_tag, "speaker": speaker,
+            "video_title": video_title, "saved_to": path,
+            "generated_at": generated_at}
+
+
 def generate_bili_meta(ep, speaker="", extra_hint="",
                        title=None, description=None, workspace="output") -> dict:
     """生成三件套并落盘 output/bili_meta.md，返回结构化结果。"""
@@ -387,8 +450,8 @@ def generate_bili_meta(ep, speaker="", extra_hint="",
     if not tr["available"]:
         raise ValueError(
             "没有可用的视频转录结果：标题必须以真实内容为依据。请先跑到第 6 步"
-            "「对齐字幕」生成 output/trans.srt（中文译文，最佳素材）；"
-            "若只想早点生成，至少跑完第 2 步「转录 whisperX」"
+            "「生成字幕」产出 output/trans.srt（中文译文，最佳素材）；"
+            "若只想早点生成，至少跑完第 1 步「转录 whisperX」"
             "产出 output/log/cleaned_chunks.json")
 
     ctx = load_video_context(workspace)

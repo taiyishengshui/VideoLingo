@@ -20,6 +20,10 @@ Functions:
                                        write-back)
 - create_or_replace_term_set()         save a WHOLE base set (new / edit)
 - write_back_terms()                   checked per-job terms -> ONE base set
+- history_term_sources()               read-only list of archived glossaries
+- history_import_preview()             dedup preview of selected archives
+- import_history_terms()               checked archived terms -> ONE base set
+- _merge_into_base_set()               THE shared base-set merge/write decision
 - term_catalog()                       read-only view of EVERY term for #/terms:
                                        union rows + each source file's FULL list
 - build_shared_context(...)            full summary + full terms + neighbors
@@ -42,6 +46,9 @@ import threading
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TERMS_DIR = os.path.join(_PROJECT_ROOT, "terms")
+# Archived task glossaries. The ONLY place that resolves a history path —
+# clients pass a bare directory name, never a path (see _resolve_hist_file).
+HISTORY_DIR = os.path.join(_PROJECT_ROOT, "history")
 CKPT_FILENAME = "output/log/translate_ckpt.json"
 
 DEFAULTS = {"chunk_size": 2400, "max_sentences": 10}
@@ -387,31 +394,22 @@ def load_job_terms(allow_fallback: bool = True) -> dict | None:
     return {"terms": merge_terms(data["terms"])}
 
 
-def write_back_terms(target: str, srcs: list, overwrite: bool = False) -> dict:
-    """THE write-back decision: checked per-job glossary entries -> ONE base
-    term set (terms/*.json).
+def _merge_into_base_set(name: str, picked: list, *, overwrite: bool = False,
+                         default_desc: str = "", desc: str | None = None) -> dict:
+    """THE single read-modify-write decision for adding terms to ONE base set.
 
-    `srcs` are KEYS only — the server re-reads src/tgt/note from the 4.1
-    glossary, so a stale browser editor can never inject a different
-    translation into a shared base set. An entry already present in the
-    target is SKIPPED by default (a manually maintained base term outranks
-    an LLM guess, exactly like step 4.1); `overwrite=True` replaces its
-    tgt/note instead. A missing target is created with shared name
-    validation; a CORRUPT target is refused rather than silently rebuilt.
-    Only terms/*.json is touched — the per-job glossary, translation
-    checkpoint and GPT cache all stay untouched (no re-translation cost).
+    Shared by `write_back_terms` (current 4.1 glossary) and
+    `import_history_terms` (archived glossaries). `picked` entries must be
+    SERVER-SIDE values re-read from disk — callers pass src keys only, so a
+    stale browser editor can never inject a different translation into a
+    shared base set. An existing src is SKIPPED by default (a manually
+    maintained translation outranks an LLM guess, same rule as step 4.1);
+    `overwrite=True` replaces its tgt/note instead. A CORRUPT target is
+    refused rather than silently rebuilt. Only terms/*.json is touched.
     """
-    name = validate_term_set_name(target)
-    job = load_job_terms(allow_fallback=False)
-    if job is None:
-        raise ValueError("当前没有任务术语表：请先跑第 4.1 步（总结与抽术语）")
-    wanted = {str(s).strip().lower() for s in (srcs or []) if str(s).strip()}
-    if not wanted:
-        raise ValueError("没有勾选任何术语")
-    picked = [t for t in job["terms"] if t["src"].strip().lower() in wanted]
+    name = validate_term_set_name(name)
     if not picked:
-        raise ValueError("勾选的术语在任务术语表里不存在")
-
+        raise ValueError("没有勾选任何术语")
     with _TERMS_LOCK:
         exists = os.path.isfile(os.path.join(TERMS_DIR, f"{name}.json"))
         if exists:
@@ -419,12 +417,11 @@ def write_back_terms(target: str, srcs: list, overwrite: bool = False) -> dict:
                 current = load_term_set(name)
             except (OSError, ValueError):
                 raise ValueError(f"术语库 {name} 读取失败或文件损坏，"
-                                 f"请先在编辑页修复后再回写")
-            desc = current.get("desc", "")
+                                 f"请先在编辑页修复后再写入")
             merged = merge_terms(current.get("terms") or [])
+            keep_desc = current.get("desc", "")
         else:
-            desc = "从任务术语表回写"
-            merged = []
+            merged, keep_desc = [], default_desc
         index = {t["src"].strip().lower(): t for t in merged}
         added = updated = skipped = 0
         for t in picked:
@@ -442,9 +439,178 @@ def write_back_terms(target: str, srcs: list, overwrite: bool = False) -> dict:
                 merged.append(entry)
                 added += 1
         if added or updated:
-            save_term_set(name, {"desc": desc, "terms": merged})
+            save_term_set(name, {
+                "desc": keep_desc if desc is None else desc, "terms": merged})
     return {"target": name, "added": added, "updated": updated,
             "skipped": skipped, "total": len(merged)}
+
+
+def write_back_terms(target: str, srcs: list, overwrite: bool = False) -> dict:
+    """Checked per-job glossary entries -> ONE base term set.
+
+    `srcs` are KEYS only — the server re-reads src/tgt/note from the 4.1
+    glossary. Only terms/*.json is touched: the per-job glossary,
+    translation checkpoint and GPT cache stay untouched (no cost).
+    """
+    validate_term_set_name(target)
+    job = load_job_terms(allow_fallback=False)
+    if job is None:
+        raise ValueError("当前没有任务术语表：请先跑第 4.1 步（总结与抽术语）")
+    wanted = {str(s).strip().lower() for s in (srcs or []) if str(s).strip()}
+    if not wanted:
+        raise ValueError("没有勾选任何术语")
+    picked = [t for t in job["terms"] if t["src"].strip().lower() in wanted]
+    if not picked:
+        raise ValueError("勾选的术语在任务术语表里不存在")
+    return _merge_into_base_set(target, picked, overwrite=overwrite,
+                                default_desc="从任务术语表回写")
+
+
+# ---------------- archived glossaries -> base term sets ----------------
+
+def _history_dir_names() -> list[str]:
+    """Real first-level directory names under history/ — the whitelist."""
+    try:
+        return sorted(d for d in os.listdir(HISTORY_DIR)
+                      if os.path.isdir(os.path.join(HISTORY_DIR, d)))
+    except OSError:
+        return []
+
+
+def _resolve_hist_file(name: str) -> str:
+    """Resolve a CLIENT-supplied archive name to its glossary path.
+
+    `name` must exactly match an existing first-level directory name under
+    history/. No separators / `..` / absolute paths, and realpath must stay
+    inside history/ — a picked archive can never escape into the project.
+    """
+    name = (name or "").strip()
+    if (not name or name in (".", "..") or os.path.basename(name) != name
+            or "/" in name or "\\" in name
+            or name not in _history_dir_names()):
+        raise ValueError(f"历史记录不存在或名称非法: {name}")
+    root = os.path.realpath(HISTORY_DIR)
+    path = os.path.realpath(os.path.join(
+        HISTORY_DIR, name, "log", "terminology.json"))
+    if not path.startswith(root + os.sep):
+        raise ValueError(f"历史记录路径越界: {name}")
+    return path
+
+
+def history_term_sources() -> list:
+    """Read-only index of EVERY archived glossary for #/terms (FR-13).
+
+    One entry per `history/<video>/log/terminology.json`. Metadata only —
+    the preview endpoint loads the selected files on demand, so GET /terms
+    stays small. A broken file is still listed with `available=False`
+    instead of silently disappearing from the picker.
+    """
+    out = []
+    for name in _history_dir_names():
+        path = os.path.join(HISTORY_DIR, name, "log", "terminology.json")
+        if not os.path.isfile(path):
+            continue
+        item = {
+            "id": name, "name": name,
+            "path": "/".join(("history", name, "log", "terminology.json")),
+            "count": 0, "theme": "", "mtime": 0, "available": False,
+        }
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            terms = data.get("terms") if isinstance(data, dict) else None
+            if not isinstance(terms, list):
+                raise ValueError("terms 不是数组")
+            item.update({"count": len(terms),
+                         "theme": str(data.get("theme") or ""),
+                         "mtime": int(os.path.getmtime(path)),
+                         "available": True})
+        except (OSError, ValueError):
+            pass
+        out.append(item)
+    return out
+
+
+def history_import_preview(names: list) -> dict:
+    """Read-only dedup preview of the selected archived glossaries.
+
+    Merge order = the order `names` is given (the UI keeps archive list
+    order); a LATER archive overrides an earlier one through `merge_terms`
+    — the project's one dedup rule, no second implementation here. Each
+    row also carries `origins` (the value in EACH archive holding that src),
+    `conflict` (those values disagree) and `duplicated` (in >1 archive).
+    """
+    if not names:
+        raise ValueError("请先选择至少一个历史记录")
+    sources, groups = [], []
+    for name in names:
+        path = _resolve_hist_file(name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            terms = data.get("terms") if isinstance(data, dict) else None
+            if not isinstance(terms, list):
+                raise ValueError("terms 不是数组")
+        except (OSError, ValueError) as e:
+            raise ValueError(f"历史术语表读取失败: {name}（{e}）") from e
+        sources.append({"name": name, "count": len(terms),
+                        "theme": str(data.get("theme") or "")})
+        groups.append((name, terms))
+
+    rows = merge_terms(*groups)
+    origins_map: dict = {}
+    for label, terms in groups:
+        for t in terms or []:
+            if not isinstance(t, dict) or not t.get("src"):
+                continue
+            key = str(t["src"]).strip().lower()
+            if not key:
+                continue
+            origins_map.setdefault(key, []).append({
+                "name": label, "src": str(t["src"]).strip(),
+                "tgt": str(t.get("tgt") or ""),
+                "note": str(t.get("note") or "")})
+
+    out = []
+    for r in rows:
+        origins = origins_map.get(r["src"].strip().lower(), [])
+        values = {(o["tgt"], o["note"]) for o in origins}
+        out.append({"key": r["src"].strip().lower(), **r,
+                    "origins": origins, "conflict": len(values) > 1,
+                    "duplicated": len(origins) > 1})
+    return {
+        "sources": sources, "rows": out,
+        "stats": {
+            "files": len(sources),
+            "entries": sum(s["count"] for s in sources),
+            "unique": len(out),
+            "conflicts": sum(1 for r in out if r["conflict"]),
+            "duplicates": sum(1 for r in out if r["duplicated"]),
+        },
+    }
+
+
+def import_history_terms(target: str, names: list, srcs: list,
+                         overwrite: bool = False,
+                         desc: str | None = None) -> dict:
+    """Checked archived terms -> ONE base term set (terms/*.json).
+
+    Values are re-read server-side from the archived files; the browser
+    sends src KEYS only. Never touches output/, history/, the checkpoint
+    or the GPT cache — zero LLM cost, and the current task is unaffected.
+    """
+    validate_term_set_name(target)
+    preview = history_import_preview(names)
+    wanted = {str(s).strip().lower() for s in (srcs or []) if str(s).strip()}
+    if not wanted:
+        raise ValueError("没有勾选任何术语")
+    picked = [{"src": r["src"], "tgt": r["tgt"], "note": r["note"]}
+              for r in preview["rows"] if r["key"] in wanted]
+    if not picked:
+        raise ValueError("勾选的术语在所选历史记录里不存在")
+    return _merge_into_base_set(
+        target, picked, overwrite=overwrite, desc=desc,
+        default_desc=f"从历史记录导入（{len(preview['sources'])} 期）")
 
 
 def term_catalog() -> dict:

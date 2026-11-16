@@ -12,6 +12,7 @@ import {
   Input,
   InputNumber,
   List,
+  Modal,
   Popconfirm,
   Radio,
   Select,
@@ -27,9 +28,11 @@ import {
   CheckCircleFilled,
   ClockCircleOutlined,
   ClearOutlined,
+  CloseCircleFilled,
   CopyOutlined,
   DeleteOutlined,
   DownloadOutlined,
+  MinusCircleFilled,
   PlusOutlined,
   FileTextOutlined,
   LoadingOutlined,
@@ -55,6 +58,8 @@ import {
   PipelineStatus,
   RunPipelineBody,
   StepStatus,
+  StepTiming,
+  TimingsReport,
   adPreviewUrl,
   clearInput,
   control,
@@ -67,6 +72,7 @@ import {
   getCookieStatus,
   getInput,
   getPipeline,
+  getTimings,
   generateBiliMeta,
   releasePreviewStreams,
   runPipeline,
@@ -315,8 +321,37 @@ function FrameScrubber(p: FrameScrubberProps) {
   )
 }
 
-function stepBadge(step: StepStatus, current: string | null, state: string) {
-  if (step.id === current && (state === 'running' || state === 'paused')) {
+/** 步骤名统一带全局序号，页面/下拉/日志/口头说的「第 N 步」才是同一个东西。 */
+function stepLabel(step?: StepStatus): string {
+  if (!step) return '—'
+  return `${step.no}. ${step.title}`
+}
+
+/** 耗时展示统一口径：小时/分钟/秒，与后端 timing_service.format_duration 一致。 */
+function durationLabel(s?: number | null): string {
+  if (s == null || !(s > 0)) return '—'
+  const n = Math.round(s)
+  if (n >= 3600) return `${Math.floor(n / 3600)}h${String(Math.floor((n % 3600) / 60)).padStart(2, '0')}m${String(n % 60).padStart(2, '0')}s`
+  if (n >= 60) return `${Math.floor(n / 60)}m${String(n % 60).padStart(2, '0')}s`
+  return `${n}s`
+}
+
+/** 墙上时间（YYYY-MM-DD HH:MM:SS）截到 HH:MM:SS，避免列表同行过长。 */
+function shortWallClock(s?: string | null): string {
+  if (!s) return '—'
+  return s.length >= 19 ? s.slice(11, 19) : s
+}
+
+function stepBadge(step: StepStatus, state: string, status: PipelineStatus | null) {
+  // 终态优先于「已完成」：失败/中止的步骤即使残留旧 marker 也必须显红/黄，
+  // 否则「运行失败」与「从未运行」视觉上无法区分（v1.32）。
+  if (state === 'error' && step.id === status?.failed_step) {
+    return <Badge status="error" text={<span style={{ color: '#ff4d4f' }}>失败</span>} />
+  }
+  if (state === 'stopped' && step.id === status?.stopped_step) {
+    return <Badge status="warning" text={<span style={{ color: '#faad14' }}>已停止</span>} />
+  }
+  if (step.id === status?.current_step && (state === 'running' || state === 'paused')) {
     return <Badge status="processing" text={<span>运行中</span>} />
   }
   if (step.done) return <Badge status="success" text="已完成" />
@@ -340,6 +375,17 @@ export default function PipelinePage() {
   const endTouched = useRef(false)
   const logRef = useRef<HTMLDivElement>(null)
   const [msgApi, ctxHolder] = message.useMessage()
+  const [timingOpen, setTimingOpen] = useState(false)
+  const [timings, setTimings] = useState<TimingsReport | null>(null)
+
+  const openTimings = useCallback(async () => {
+    setTimingOpen(true)
+    try {
+      setTimings(await getTimings())
+    } catch (e) {
+      msgApi.error(`耗时统计读取失败：${String(e)}`)
+    }
+  }, [msgApi])
 
   const refresh = useCallback(() => {
     getPipeline().then(setStatus).catch((e) => msgApi.error(String(e)))
@@ -363,7 +409,7 @@ export default function PipelinePage() {
     saveInputDraft({ url, resolution })
   }, [url, resolution])
 
-  /* 默认值来自服务层：开始=转录；结束按烧录开关（关→对齐字幕，开→合并字幕到视频）。
+  /* 默认值来自服务层：开始=转录；结束按烧录开关（关→第 6 步「生成字幕」，开→第 7 步）。
      用户在设置页改了开关后，下一次刷新状态就会同步（除非手动选过结束步骤）。 */
   const defaultFrom = status?.defaults?.from_step
   const defaultTo = status?.defaults?.to_step
@@ -448,6 +494,10 @@ export default function PipelinePage() {
   const [generating, setGenerating] = useState(false)
   const [biliResult, setBiliResult] = useState<BiliMetaResult | null>(null)
   const [chosenTitle, setChosenTitle] = useState('')
+  const [biliRestored, setBiliRestored] = useState(false)
+  // 只在首次成功取到 context 时从落盘文件恢复一次；之后任何刷新都不动结果区，
+  // 避免覆盖用户已选标题或本次刚生成的文案（FR-27 v1.37）。
+  const biliHydratedRef = useRef(false)
 
   const refreshBili = useCallback(() => {
     getBiliContext()
@@ -456,6 +506,14 @@ export default function PipelinePage() {
         setBiliTitle(c.title)
         setBiliDesc(c.description)
         if (!speakerTouched.current) setSpeaker(c.speaker_suggest)
+        if (!biliHydratedRef.current) {
+          biliHydratedRef.current = true
+          if (c.existing) {
+            setBiliResult(c.existing)
+            setChosenTitle(c.existing.titles[0] ?? '')
+            setBiliRestored(true)
+          }
+        }
       })
       .catch(() => setBiliCtx(null))
   }, [])
@@ -479,6 +537,8 @@ export default function PipelinePage() {
       .then((res) => {
         setBiliResult(res)
         setChosenTitle(res.titles[0] ?? '')
+        setBiliRestored(false)
+        biliHydratedRef.current = true
         try {
           localStorage.setItem('videolingo.bili.ep', String(ep))
         } catch {
@@ -1020,8 +1080,8 @@ export default function PipelinePage() {
   const startIdx = startId ? ids.indexOf(startId) : -1
   const endIdx = endId ? ids.indexOf(endId) : -1
   const rangeValid = startIdx >= 0 && endIdx >= startIdx
-  const startTitle = steps[startIdx]?.title ?? '—'
-  const endTitle = steps[endIdx]?.title ?? '—'
+  const startTitle = stepLabel(steps[startIdx])
+  const endTitle = stepLabel(steps[endIdx])
   const runRange = { from_step: startId as string, to_step: endId as string }
   const onStartChange = (v: string) => {
     setFromStep(v)
@@ -1031,7 +1091,7 @@ export default function PipelinePage() {
   }
 
   /* 「完整跑阶段一」是固定快捷方式：从转录跑到【默认】结束步骤，
-     不受顶部两个下拉的临时选择影响。不烧录时默认停在「对齐字幕」，
+     不受顶部两个下拉的临时选择影响。不烧录时默认停在第 6 步「生成字幕」，
      不会去生成 0 秒黑屏占位视频。 */
   const subSteps = steps.filter((s) => s.stage === 'sub')
   const stageFirstId = subSteps[0]?.id
@@ -1041,8 +1101,8 @@ export default function PipelinePage() {
   const stageRange = stageFirstId && stageEndId
     ? { from_step: stageFirstId, to_step: stageEndId }
     : null
-  const stageStartTitle = subSteps[0]?.title ?? '转录 whisperX'
-  const stageEndTitle = steps.find((s) => s.id === stageEndId)?.title ?? '—'
+  const stageStartTitle = stepLabel(subSteps[0])
+  const stageEndTitle = stepLabel(steps.find((s) => s.id === stageEndId))
   const stageDisabled = runBusy || !stageRange || !inputInfo?.exists || inputInfo.ambiguous
 
   const act = async (fn: () => Promise<void>) => {
@@ -1251,7 +1311,7 @@ export default function PipelinePage() {
         <Space direction="vertical" size={8} style={{ width: '100%' }}>
           {!adReady && (
             <Alert type="info" showIcon message="还没有转录结果，自动识别广告位不可用"
-              description="自动识别要以 trans.srt 为依据（先跑到「对齐字幕」再刷新）；但手动切点、预览微调、保存和裁剪都不需要转录，可直接使用。" />
+              description="自动识别要以 trans.srt 为依据（先跑到第 6 步「生成字幕」再刷新）；但手动切点、预览微调、保存和裁剪都不需要转录，可直接使用。" />
           )}
           <Space wrap size={8}>
             <Input style={{ width: 250 }} placeholder="补充要求（可选），如：只标中插、忽略片尾"
@@ -1473,7 +1533,7 @@ export default function PipelinePage() {
         <Space direction="vertical" size={8} style={{ width: '100%' }}>
           {!transcriptReady && (
             <Alert type="warning" showIcon message="还没有转录结果"
-              description="文案以视频真实内容为依据：请先跑到第 6 步「对齐字幕」产出 trans.srt（中文译文，最佳素材）；或至少跑完第 2 步「转录 whisperX」。跑完点右上角刷新。" />
+              description="文案以视频真实内容为依据：请先跑到第 6 步「生成字幕」产出 trans.srt（中文译文，最佳素材）；或至少跑完第 1 步「转录 whisperX」。跑完点右上角刷新。" />
           )}
           {biliTr && transcriptReady && biliTr.sampled && (
             <Alert type="info" showIcon
@@ -1531,7 +1591,9 @@ export default function PipelinePage() {
                   复制全部
                 </Button>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {biliRestored && <Tag color="blue">上次生成 · 已自动恢复</Tag>}
                   {biliResult.ep_tag}｜{biliResult.speaker} · 已存 {biliResult.saved_to}
+                  {biliResult.generated_at ? ` · ${biliResult.generated_at}` : ''}
                   {biliResult.transcript && (
                     <> · 素材 {biliResult.transcript.label}
                       （{biliResult.transcript.sampled ? `节选 ${biliResult.transcript.samples} 段` : '全文'}）</>
@@ -1543,11 +1605,42 @@ export default function PipelinePage() {
         </Space>
       </Card>
 
+      {state === 'error' && (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={
+            <span>
+              步骤失败：
+              {stepLabel(steps.find((s) => s.id === status?.failed_step)) || status?.failed_step}
+            </span>
+          }
+          description={
+            <Space direction="vertical" size={4} style={{ width: '100%' }}>
+              <Typography.Text copyable={{ text: status?.error }} style={{ fontSize: 13 }}>
+                {status?.error}
+              </Typography.Text>
+              {status?.log_file && (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }} code>
+                  {status.log_file}
+                </Typography.Text>
+              )}
+            </Space>
+          }
+        />
+      )}
+
       <Card size="small">
         <Space wrap>
           <Tag color={connected ? 'green' : 'red'}>{connected ? '已连接' : '连接断开'}</Tag>
           <Tag>{state}</Tag>
-          {status?.current_step && <Tag color="blue">{status.current_step}</Tag>}
+          <Button size="small" icon={<ClockCircleOutlined />} onClick={() => void openTimings()}>
+            每步耗时
+          </Button>
+          {status?.current_step && (
+            <Tag color="blue">{stepLabel(steps.find((s) => s.id === status.current_step))}</Tag>
+          )}
           <Space size={4}>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>开始</Typography.Text>
             <Select
@@ -1556,12 +1649,12 @@ export default function PipelinePage() {
               value={startId ?? undefined}
               onChange={onStartChange}
               disabled={runBusy}
-              options={steps.map((s) => ({ value: s.id, label: s.title }))}
+              options={steps.map((s) => ({ value: s.id, label: stepLabel(s) }))}
             />
           </Space>
           <Space size={4}>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>结束</Typography.Text>
-            <Tooltip title="默认跟随设置里的「烧录字幕到视频」：关闭时停在「对齐字幕」（生成 srt），开启时到「合并字幕到视频」">
+            <Tooltip title="默认跟随设置里的「烧录字幕到视频」：关闭时停在第 6 步「生成字幕」（产出 srt），开启时到第 7 步「合并字幕到视频」">
               <Select
                 style={{ width: 165 }}
                 placeholder="结束步骤"
@@ -1569,7 +1662,7 @@ export default function PipelinePage() {
                 onChange={(v) => { endTouched.current = true; setToStep(v) }}
                 disabled={runBusy}
                 options={steps.map((s, i) => ({
-                  value: s.id, label: s.title, disabled: i < startIdx,
+                  value: s.id, label: stepLabel(s), disabled: i < startIdx,
                 }))}
               />
             </Tooltip>
@@ -1705,7 +1798,7 @@ export default function PipelinePage() {
                   actions={[
                     <Popconfirm
                       key="force"
-                      title={`强制重跑「${step.title}」？`}
+                      title={`强制重跑「${stepLabel(step)}」？`}
                       description={
                         <span>
                           会删除这一步的产物、断点与 LLM 缓存后从头重做。
@@ -1736,7 +1829,11 @@ export default function PipelinePage() {
                 >
                   <List.Item.Meta
                     avatar={
-                      step.id === status?.current_step && active ? (
+                      state === 'error' && step.id === status?.failed_step ? (
+                        <CloseCircleFilled style={{ fontSize: 18, color: '#ff4d4f' }} />
+                      ) : state === 'stopped' && step.id === status?.stopped_step ? (
+                        <MinusCircleFilled style={{ fontSize: 18, color: '#faad14' }} />
+                      ) : step.id === status?.current_step && active ? (
                         <LoadingOutlined style={{ fontSize: 18, color: '#1677ff' }} />
                       ) : step.done ? (
                         <CheckCircleFilled style={{ fontSize: 18, color: '#52c41a' }} />
@@ -1744,8 +1841,32 @@ export default function PipelinePage() {
                         <ClockCircleOutlined style={{ fontSize: 18, color: '#bbb' }} />
                       )
                     }
-                    title={step.title}
-                    description={stepBadge(step, status?.current_step ?? null, state)}
+                    title={
+                      <Space size={8} wrap>
+                        <Tag color="blue" style={{ marginInlineEnd: 0, minWidth: 26, textAlign: 'center' }}>
+                          {step.no}
+                        </Tag>
+                        <span>{step.title}</span>
+                        {stepBadge(step, state, status)}
+                        {!!step.last_started_at && (
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            开始 {shortWallClock(step.last_started_at)}
+                          </Typography.Text>
+                        )}
+                        {!!step.last_ended_at && (
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            结束 {shortWallClock(step.last_ended_at)}
+                          </Typography.Text>
+                        )}
+                        {!!step.last_seconds && (
+                          <Tooltip title={`上一次实跑耗时 · 共记录 ${step.run_count ?? 0} 次`}>
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                              耗时 {durationLabel(step.last_seconds)}
+                            </Typography.Text>
+                          </Tooltip>
+                        )}
+                      </Space>
+                    }
                   />
                 </List.Item>
               )}
@@ -1794,6 +1915,58 @@ export default function PipelinePage() {
           {lines.length ? lines.join('\n') : '等待任务输出…（流水线步骤、广告位识别、视频裁剪、文案生成的日志都会实时出现在这里）'}
         </div>
       </Card>
+
+      <Modal
+        title="每步耗时统计"
+        open={timingOpen}
+        onCancel={() => setTimingOpen(false)}
+        width={720}
+        footer={[
+          <Button key="refresh" onClick={() => void openTimings()}>刷新</Button>,
+          <Button key="close" type="primary" onClick={() => setTimingOpen(false)}>关闭</Button>,
+        ]}
+      >
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          数据来自 output/log/step_timings.json（每步结束原子落盘）与历史 pipeline_*.log 回溯；中止/失败的运行不计入「最快」。
+          {timings?.updated_at ? ` 更新于 ${timings.updated_at}。` : ''}
+        </Typography.Paragraph>
+        <Table<StepTiming>
+          size="small" rowKey="id" pagination={false}
+          dataSource={Object.values(timings?.by_step ?? {}).sort((a, b) => (a.no || 99) - (b.no || 99))}
+          columns={[
+            { title: '#', dataIndex: 'no', width: 50, render: (v: number) => v || '-' },
+            { title: '步骤', dataIndex: 'title' },
+            { title: '上次', dataIndex: 'last', width: 96, render: (v: number) => durationLabel(v) },
+            { title: '最快', dataIndex: 'best', width: 96, render: (v: number) => durationLabel(v) },
+            { title: '次数', dataIndex: 'count', width: 62 },
+            { title: '累计', dataIndex: 'total', width: 96, render: (v: number) => durationLabel(v) },
+          ]}
+        />
+        {!!timings?.dub && Object.keys(timings.dub).length > 0 && (
+          <>
+            <Typography.Title level={5} style={{ marginTop: 18, fontSize: 14 }}>
+              10. 生成配音 — 内部拆解
+              <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 400, marginLeft: 8 }}>
+                {String(timings.dub.source ?? '')}
+              </Typography.Text>
+            </Typography.Title>
+            <Table
+              size="small" pagination={false} rowKey="k"
+              dataSource={[
+                ['合成段数', String(timings.dub.segments ?? '—')],
+                ['TTS 推理阶段（合计）', durationLabel(Number(timings.dub.tts_seconds))],
+                ['├ GPT 自回归', durationLabel(Number(timings.dub.gpt_seconds))],
+                ['├ s2mel 扩散', durationLabel(Number(timings.dub.s2mel_seconds))],
+                ['├ BigVGAN 声码器', durationLabel(Number(timings.dub.bigvgan_seconds))],
+                ['└ 参考音频 / 文本 / 存盘', durationLabel(Number(timings.dub.overhead_seconds))],
+                ['变速与拼轴阶段', durationLabel(Number(timings.dub.chunks_seconds))],
+              ].map(([k, v]) => ({ k, v }))}
+              columns={[{ title: '阶段', dataIndex: 'k' }, { title: '耗时', dataIndex: 'v', width: 120 }]}
+              showHeader={false}
+            />
+          </>
+        )}
+      </Modal>
     </Space>
   )
 }

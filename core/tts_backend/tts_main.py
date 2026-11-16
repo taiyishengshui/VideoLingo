@@ -2,7 +2,7 @@ import os
 import re
 from pydub import AudioSegment
 
-from core.asr_backend.audio_preprocess import get_audio_duration
+from core.services.dub_timeline_service import wav_duration
 from core.tts_backend.gpt_sovits_tts import gpt_sovits_tts_for_videolingo
 from core.tts_backend.sf_fishtts import siliconflow_fish_tts_for_videolingo
 from core.tts_backend.openai_tts import openai_tts
@@ -22,7 +22,7 @@ def clean_text_for_tts(text):
         text = text.replace(char, '')
     return text.strip()
 
-def tts_main(text, save_as, number, task_df):
+def tts_main(text, save_as, number, task_df, line_index=None):
     text = clean_text_for_tts(text)
     # Check if text is empty or single character, single character voiceovers are prone to bugs
     cleaned_text = re.sub(r'[^\w\s]', '', text).strip()
@@ -68,10 +68,11 @@ def tts_main(text, save_as, number, task_df):
                 # 局部导入：只有真正选用本地大模型配音时才触碰 indextts 依赖，
                 # 既避免拖慢 vl 启动，也避免未装插件时影响其他配音方式。
                 from core.tts_backend.index_tts import index_tts_for_videolingo
-                index_tts_for_videolingo(text, save_as, number, task_df)
+                index_tts_for_videolingo(text, save_as, number, task_df,
+                                        chunk_index=line_index)
 
             # Check generated audio duration
-            duration = get_audio_duration(save_as)
+            duration = wav_duration(save_as)
             if duration > 0:
                 break
             else:

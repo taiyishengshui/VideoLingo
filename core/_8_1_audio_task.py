@@ -8,6 +8,7 @@ from core.utils.models import *
 # 2026-09-08: check_len_then_trim / time_diff_seconds moved to
 # core/utils/audio_trim.py (shared tool). This step only orchestrates.
 from core.utils.audio_trim import time_diff_seconds
+from core.services.subtitle_turn_service import looks_like_cross_turn
 
 console = Console()
 
@@ -66,10 +67,26 @@ def process_srt():
     
     i = 0
     MIN_SUB_DUR = load_key("min_subtitle_duration")
+    # 默认关闭：开启会改变任务表行数 → voice_map 契约 fingerprint 失效、
+    # 人工种子与终审结果需重新标注。想从源头少产生双人混句时再打开。
+    try:
+        avoid_cross_turn = bool(load_key("avoid_cross_turn_merge"))
+    except (KeyError, TypeError, ValueError):
+        avoid_cross_turn = False
+    protected = 0
     while i < len(df):
         today = datetime.date.today()
         if df.loc[i, 'duration'] < MIN_SUB_DUR:
-            if i < len(df) - 1 and time_diff_seconds(df.loc[i, 'start_time'],df.loc[i+1, 'start_time'],today) < MIN_SUB_DUR:
+            can_merge = (i < len(df) - 1
+                         and time_diff_seconds(df.loc[i, 'start_time'],df.loc[i+1, 'start_time'],today) < MIN_SUB_DUR)
+            if can_merge and avoid_cross_turn and looks_like_cross_turn(
+                    df.loc[i, 'text'], df.loc[i+1, 'text'],
+                    df.loc[i, 'origin'], df.loc[i+1, 'origin']):
+                # 不合并也不强行延长：两句保持各自原始时间轴。
+                protected += 1
+                i += 1
+                continue
+            if can_merge:
                 rprint(f"[bold yellow]Merging subtitles {i+1} and {i+2}[/bold yellow]")
                 df.loc[i, 'text'] += ' ' + df.loc[i+1, 'text']
                 df.loc[i, 'origin'] += ' ' + df.loc[i+1, 'origin']
@@ -87,6 +104,9 @@ def process_srt():
                 i += 1
         else:
             i += 1
+
+    if protected:
+        rprint(f"[bold cyan]话轮保护：{protected} 处疑似双人交替未合并（avoid_cross_turn_merge=true）[/bold cyan]")
     
     df['start_time'] = df['start_time'].apply(lambda x: x.strftime('%H:%M:%S.%f')[:-3])
     df['end_time'] = df['end_time'].apply(lambda x: x.strftime('%H:%M:%S.%f')[:-3])

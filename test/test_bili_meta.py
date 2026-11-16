@@ -400,3 +400,90 @@ def test_speaker_can_be_recognized_from_transcript(tmp_cwd):
     ctx = {"title": "", "uploader": "", "description": ""}
     assert suggest_speaker(ctx, "今天我们请到 Matthew Hussey 谈谈亲密关系") \
         == "Matthew Hussey"
+
+
+# ---------------- 刷新回显（FR-27 v1.37）：md 是唯一真相源 ----------------
+
+def _write_good_md(workspace="output", *, mutate=None):
+    """用唯一的 _render_md 造一份真实格式的 md，可按 mutate 改坏。"""
+    from core.services.bili_meta_service import _render_md
+    tr = {"label": "中文译文字幕（trans.srt）", "sampled": False,
+          "samples": 0, "total_chars": 7882}
+    md = _render_md(GOOD, "EP042", "Matthew Hussey", "How to Fix It", tr)
+    if mutate:
+        md = mutate(md)
+    os.makedirs(workspace, exist_ok=True)
+    with open(os.path.join(workspace, "bili_meta.md"), "w", encoding="utf-8") as f:
+        f.write(md)
+    return md
+
+
+def test_load_saved_bili_meta_roundtrip(tmp_cwd):
+    from core.services.bili_meta_service import load_saved_bili_meta
+    _write_good_md()
+    got = load_saved_bili_meta("output")
+    assert got is not None
+    assert got["titles"] == GOOD["titles"]
+    assert got["desc"] == GOOD["desc"]
+    assert got["tags"] == GOOD["tags"]
+    assert got["ep_tag"] == "EP042" and got["speaker"] == "Matthew Hussey"
+    assert got["video_title"] == "How to Fix It"
+    assert got["saved_to"].endswith("bili_meta.md")
+    assert got["generated_at"]
+
+
+def test_generate_then_reload_survives_refresh(tmp_cwd, cfg_path, fake_llm):
+    """生成 → 重新读盘 == 刷新页面后 /context 的 existing。"""
+    cfg_path()
+    fake_llm([resp_ok(json.dumps(GOOD, ensure_ascii=False))])
+    _write_srt("output", "trans.srt")
+    from core.services.bili_meta_service import generate_bili_meta, load_saved_bili_meta
+    res = generate_bili_meta(ep=42, speaker="Matthew Hussey", title="T",
+                             description="D", workspace="output")
+    got = load_saved_bili_meta("output")
+    assert got is not None
+    assert got["titles"] == res["titles"] == GOOD["titles"]
+    assert got["desc"] == res["desc"] and got["tags"] == res["tags"]
+
+
+def test_load_saved_bili_meta_missing(tmp_cwd):
+    from core.services.bili_meta_service import load_saved_bili_meta
+    assert load_saved_bili_meta("output") is None
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda md: md.replace("## 标签", "## 没有标签"),       # 缺标签节
+    lambda md: md.replace("，断联", ""),                   # 只剩 9 个标签
+    lambda md: md.replace("3. EP042", "3. XXX"),          # 标题丢 EP 前缀
+    lambda md: md[:md.index("## 简介")],                  # 缺简介 + 标签
+    lambda md: md.replace("# B站投稿文案（", "# 随便写点什么（"),
+])
+def test_load_saved_bili_meta_corrupt_returns_none(tmp_cwd, mutate):
+    from core.services.bili_meta_service import load_saved_bili_meta
+    _write_good_md(mutate=mutate)
+    assert load_saved_bili_meta("output") is None
+
+
+def test_load_saved_bili_meta_bad_encoding(tmp_cwd):
+    from core.services.bili_meta_service import load_saved_bili_meta
+    os.makedirs("output", exist_ok=True)
+    with open("output/bili_meta.md", "wb") as f:
+        f.write(b"\xff\xfe\x00bad")
+    assert load_saved_bili_meta("output") is None
+
+
+def test_api_context_exposes_existing(bili_client):
+    _write_good_md()
+    d = bili_client.get("/api/bili/context").json()
+    assert d["existing"]["titles"] == GOOD["titles"]
+    assert d["existing"]["tags"] == GOOD["tags"]
+    assert d["existing"]["ep_tag"] == "EP042"
+    # 归档清空 output 后 md 被搬走 → existing 自然为 null（新视频不显示旧文案）
+    os.remove("output/bili_meta.md")
+    assert bili_client.get("/api/bili/context").json()["existing"] is None
+
+
+def test_api_context_survives_corrupt_md(bili_client):
+    _write_good_md(mutate=lambda md: md.replace("## 简介", "## 坏掉的节"))
+    r = bili_client.get("/api/bili/context")
+    assert r.status_code == 200 and r.json()["existing"] is None

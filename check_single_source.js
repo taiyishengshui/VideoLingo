@@ -124,6 +124,27 @@ const RULES = [
     msg: 'per-source term file labels must come from term_catalog() in translate_service only',
   },
   {
+    id: 'history-term-import-decisions',
+    // archived glossaries -> base term sets: path whitelist, dedup preview
+    // and the shared read-modify-write are ONE decision. No API/UI may
+    // re-read history/*.json or hand-roll a second merge/write rule.
+    home: 'core/services/translate_service.py',
+    pattern: /def\s+(?:history_term_sources|history_import_preview|import_history_terms|_merge_into_base_set|_resolve_hist_file)\s*\(/g,
+    scan: ['core/**/*.py', 'server/**/*.py'],
+    allow: ['core/services/translate_service.py'],
+    msg: 'history glossary enumeration / dedup preview / base-set import must live only in core/services/translate_service.py',
+  },
+  {
+    id: 'history-glossary-path',
+    // the ONLY path to an archived glossary; a client-supplied name must
+    // never be joined into a filesystem path anywhere else.
+    home: 'core/services/translate_service.py',
+    pattern: /os\.path\.join\(\s*HISTORY_DIR|["']log["']\s*,\s*["']terminology\.json["']/g,
+    scan: ['core/**/*.py', 'server/**/*.py'],
+    allow: ['core/services/translate_service.py'],
+    msg: 'history/<name>/log/terminology.json must be resolved only by _resolve_hist_file() in translate_service',
+  },
+  {
     id: 'ad-default-source',
     home: 'core/services/ad_cut_service.py',
     pattern: /def\s+default_source\s*\(/g,
@@ -150,6 +171,46 @@ const RULES = [
     scan: ['core/**/*.py', 'server/**/*.py'],
     allow: ['server/preview_stream.py'],
     msg: 'preview read handles must be registered/released only by server/preview_stream.py — call close_preview_streams() instead',
+  },
+  {
+    id: 'dub-task-table-cell-codec',
+    // tts_tasks.xlsx stores str(list); numpy>=2 leaks np.float64(...) into
+    // new_sub_times and a bare eval() in step 11 explodes. ONE codec for both
+    // the write and the read side (v1.27).
+    home: 'core/services/dub_timeline_service.py',
+    pattern: /def\s+(?:parse_excel_list|plain_time_pairs)\s*\(/g,
+    scan: ['core/**/*.py', 'server/**/*.py'],
+    allow: [
+      'core/services/dub_timeline_service.py',   // the home
+    ],
+    msg: 'tts_tasks.xlsx list-cell codec must live only in core/services/dub_timeline_service.py — import parse_excel_list / plain_time_pairs instead',
+  },
+  {
+    id: 'qwen3-asr-runtime-dispatch',
+    // FR-35: ASR runtime is dispatched in exactly one place. A second
+    // `runtime == "qwen3_asr"` branch would silently split decode policy,
+    // hints and checkpoint fingerprints.
+    home: 'core/_2_asr.py',
+    pattern: /runtime\s*==\s*["']qwen3_asr["']/g,
+    scan: ['core/**/*.py', 'server/**/*.py'],
+    allow: [
+      'core/_2_asr.py',   // the home
+    ],
+    msg: 'Qwen3-ASR runtime dispatch must live only in core/_2_asr.py — do not add a second ASR runtime decision',
+  },
+  {
+    id: 'bili-meta-md-format',
+    // FR-27 v1.37: bili_meta.md is the single source of truth for the last
+    // generated copy. _render_md (write) and load_saved_bili_meta (read) must
+    // remain the ONLY pair that knows its layout; no second parser in an API
+    // entry point (that is exactly how the refresh-empty-state bug happened).
+    home: 'core/services/bili_meta_service.py',
+    pattern: /["']## (?:标题候选|标签)["']|# B站投稿文案（/g,
+    scan: ['core/**/*.py', 'server/**/*.py'],
+    allow: [
+      'core/services/bili_meta_service.py',   // the home
+    ],
+    msg: 'bili_meta.md layout must live only in core/services/bili_meta_service.py (_render_md + load_saved_bili_meta) — never parse it in server/ or frontend/',
   },
 ];
 
