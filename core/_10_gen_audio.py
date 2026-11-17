@@ -16,6 +16,7 @@ from core.tts_backend.tts_main import tts_main
 from core.services.dub_timeline_service import (
     parse_excel_list, plain_time_pairs, wav_duration,
 )
+from core.services import dub_axis_service as dub_axis
 
 console = Console()
 
@@ -239,6 +240,15 @@ def merge_chunks(tasks_df: pd.DataFrame) -> pd.DataFrame:
         speed_workers = 4
     tasks_df['new_sub_times'] = None
 
+    # FR-41 dubbing-axis guard. The key is OPTIONAL: no config change is
+    # needed to turn it on, and `dub.axis_guard: false` restores the legacy
+    # accumulated axis byte-for-byte.
+    try:
+        axis_guard = load_key("dub.axis_guard")
+    except KeyError:
+        axis_guard = True
+    axis_guard = True if axis_guard is None else bool(axis_guard)
+
     jobs = []
     for index, row in tasks_df.iterrows():
         number = int(row['number'])
@@ -263,6 +273,7 @@ def merge_chunks(tasks_df: pd.DataFrame) -> pd.DataFrame:
                 speed_factor, keep_gaps, chunk_end_time = plan[index]
                 chunk_start_time = float(parse_df_srt_time(chunk_df.iloc[0]['start_time']))
                 cur_time = float(chunk_start_time)
+                last_main_idx = None
                 for i, row in chunk_df.iterrows():
                     if i != 0 and keep_gaps:
                         cur_time += float(chunk_df.iloc[i-1]['gap'])/speed_factor
@@ -278,6 +289,33 @@ def merge_chunks(tasks_df: pd.DataFrame) -> pd.DataFrame:
                         cur_time += ad_dur
                     main_df_idx = tasks_df[tasks_df['number'] == row['number']].index[0]
                     tasks_df.at[main_df_idx, 'new_sub_times'] = plain_time_pairs(new_sub_times)
+                    last_main_idx = main_df_idx
+
+                # FR-41: a chunk whose last row leaves a long silent tail can
+                # put that silence exactly on the real English speech. Only
+                # extreme rows are touched; everything else keeps the legacy
+                # accumulated timeline.
+                if axis_guard and last_main_idx is not None:
+                    last_times = parse_excel_list(
+                        tasks_df.at[last_main_idx, 'new_sub_times'])
+                    if last_times:
+                        dub_dur = (float(last_times[-1][1])
+                                   - float(last_times[0][0]))
+                        last_row = tasks_df.loc[last_main_idx]
+                        delta = dub_axis.axis_delta(
+                            src_start=float(parse_df_srt_time(last_row['start_time'])),
+                            src_end=float(parse_df_srt_time(last_row['end_time'])),
+                            dub_dur=dub_dur, cur_time=cur_time,
+                            chunk_end_time=chunk_end_time,
+                            audio_file=_VOCAL_AUDIO_FILE,
+                            enabled=axis_guard)
+                        if delta > 1e-3:
+                            tasks_df.at[last_main_idx, 'new_sub_times'] = (
+                                plain_time_pairs(
+                                    dub_axis.shift_sub_times(last_times, delta)))
+                            cur_time = float(chunk_end_time)
+                            rprint(f"[cyan]↔️ 配音轴护栏：末行右移 {delta:.3f}s "
+                                   f"（对齐真实发声段）[/cyan]")
                 emoji = "⚡" if speed_factor <= accept else "⚠️"
                 rprint(f"[cyan]{emoji} Processed chunk {chunk_start} to {index} with speed factor {speed_factor}[/cyan]")
                 if cur_time > chunk_end_time:

@@ -5,7 +5,11 @@ import {
   SettingOutlined, AppstoreOutlined, BookOutlined, ReloadOutlined,
   PoweroffOutlined, SoundOutlined,
 } from '@ant-design/icons'
-import { getVersion } from './api'
+import { getVersion, type VersionInfo } from './api'
+
+// Vite injects the git short hash at build time (FR-37 / v1.39).
+declare const __BUILD_ID__: string
+const FRONTEND_HASH = typeof __BUILD_ID__ === 'undefined' ? 'unknown' : __BUILD_ID__
 import PipelinePage from './pages/PipelinePage'
 import BatchPage from './pages/BatchPage'
 import ModelsPage from './pages/ModelsPage'
@@ -47,10 +51,10 @@ async function waitServerBack(timeoutMs = 60000): Promise<void> {
 export default function App() {
   const [page, setPage] = useState<PageKey>(pageFromHash)
   const [restarting, setRestarting] = useState(false)
-  const [version, setVersion] = useState('')
+  const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null)
 
   useEffect(() => {
-    getVersion().then(setVersion).catch(() => setVersion(''))
+    getVersion().then(setVersionInfo).catch(() => setVersionInfo(null))
   }, [])
 
   // back/forward buttons keep working
@@ -109,10 +113,20 @@ export default function App() {
       <Header style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
         <Typography.Text strong style={{ color: '#fff', fontSize: 16, whiteSpace: 'nowrap' }}>
           VideoLingo
-          {version && (
-            <span style={{ marginLeft: 8, fontSize: 12, fontWeight: 400, opacity: 0.65 }}>
-              v{version}
+          {versionInfo && (
+            <span style={{ marginLeft: 8, fontSize: 12, fontWeight: 400, opacity: 0.65, whiteSpace: 'nowrap' }}>
+              v{versionInfo.version}
+              {versionInfo.build && (
+                <> · 后端 {versionInfo.build.hash}{versionInfo.build.dirty ? '*' : ''} · 前端 {FRONTEND_HASH}</>
+              )}
             </span>
+          )}
+          {versionInfo?.build && FRONTEND_HASH !== 'unknown' &&
+            versionInfo.build.hash !== 'unknown' &&
+            versionInfo.build.hash !== FRONTEND_HASH && (
+            <Typography.Text style={{ fontSize: 12, color: '#faad14', whiteSpace: 'nowrap' }}>
+              前端 dist 过期，请 npm run build + Ctrl+F5
+            </Typography.Text>
           )}
         </Typography.Text>
         <Menu

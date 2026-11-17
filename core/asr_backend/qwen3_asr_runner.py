@@ -19,6 +19,26 @@ from pathlib import Path
 SAMPLE_RATE = 16000
 
 
+def _force_utf8() -> None:
+    """Windows Chinese locale encodes stdio as GBK; the host decodes UTF-8.
+
+    Without this, Chinese diagnostics become mojibake and the JSON transcript
+    on stdout is corrupted. Safe to skip when the stream is not reconfigurable
+    (e.g. pytest capture).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+
+
+_force_utf8()
+
+
 def log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
@@ -55,20 +75,39 @@ def _field(item, *names):
 
 
 def parse_stamps(result) -> list[dict]:
-    """One ASR result -> [{word, start, end}] relative to the window audio."""
+    """One ASR result -> [{word, start, end}] relative to the window audio.
+
+    qwen-asr 0.0.6 returns a ForcedAlignResult dataclass whose `.items` holds
+    ForcedAlignItem(text, start_time, end_time) in SECONDS (align() already
+    divided milliseconds by 1000). Older / mocked shapes — list of dicts,
+    list of objects, nested lists, plain iterables — stay supported.
+    """
     stamps = _field(result, "time_stamps")
     if stamps is None:
         raise RuntimeError(
             "ForcedAligner 未返回 time_stamps：请确认 qwen3_asr.aligner 已配置、"
             "权重已下载，且该语言在 ForcedAligner 支持的 11 语种内"
         )
-    if isinstance(stamps, (list, tuple)) and stamps and isinstance(stamps[0], (list, tuple)):
-        stamps = stamps[0]
-    if not isinstance(stamps, (list, tuple)):
-        stamps = [stamps]
+
+    items = None
+    if not isinstance(stamps, dict):
+        candidate = getattr(stamps, "items", None)
+        # dict.items is a bound method — never mistake it for the item list.
+        if candidate is not None and not callable(candidate):
+            items = candidate
+    if items is None:
+        if isinstance(stamps, (list, tuple)):
+            items = stamps[0] if stamps and isinstance(stamps[0], (list, tuple)) else stamps
+        elif isinstance(stamps, dict):
+            items = [stamps]
+        else:
+            try:
+                items = list(stamps)  # __iter__ (ForcedAlignResult implements it)
+            except TypeError:
+                items = [stamps]
 
     words: list[dict] = []
-    for item in stamps:
+    for item in items:
         text = _field(item, "text", "word", "char")
         start = _field(item, "start_time", "start")
         end = _field(item, "end_time", "end")
@@ -76,10 +115,189 @@ def parse_stamps(result) -> list[dict]:
             continue
         words.append({"word": str(text), "start": float(start), "end": float(end)})
     if not words:
+        count = len(items) if hasattr(items, "__len__") else "?"
         raise RuntimeError(
-            "ForcedAligner 时间戳为空或格式不可识别（需 text/start_time/end_time）"
+            "ForcedAligner 时间戳为空或格式不可识别（需 text/start_time/end_time）；"
+            f"time_stamps 类型={type(stamps).__name__}，"
+            f"items 类型={type(items).__name__}，条目数={count}"
         )
     return words
+
+
+# --- Word-level stamp normalization (FR-39) ---------------------------------
+# ForcedAligner leaves ~5% of function words with start == end (no acoustic
+# segment), and occasionally emits a zero-width hallucinated duplicate of a
+# nearby long token. Nothing here may touch a word that WAS aligned.
+MIN_INTERP_GAP = 0.02
+HALLUCINATION_CHARS = 30
+URL_WORD_CHARS = 20
+# Deliberately narrow: org (organi*zation*), net (inter*net*) and even com
+# (ac*com*modation) occur inside ordinary long English words. Only a token
+# that appears EXACTLY ONCE, with a domain-sized prefix and a short path,
+# is treated as a run-together URL.
+URL_TOKENS = ("www", "com")
+
+# --- Uniform-stretch stamp guard (FR-41) -----------------------------------
+# When a long stretch has no usable acoustic anchor (music / applause / ad
+# voice-over), the forced aligner sometimes "spreads" a run of words evenly
+# across it. In the 8:02 case four words were each exactly 1.52 s long with
+# 3.04 s between starts, inflating the sentence window to 12.32 s even though
+# the real speech was only the last ~3 s. We ONLY shrink their durations:
+# starts, order, text and word count are never touched, and no word is ever
+# relocated by guessing which energy peak is "the real speech" (the ad segment
+# measured rms 3831 vs 4084 for the real line — energy cannot separate them).
+MIN_STRETCH_WORDS = 3
+MIN_STRETCH_WORD_DUR = 1.0
+MIN_STRETCH_SPAN = 5.0
+STRETCH_INTERVAL_TOL = 0.15
+STRETCH_SEC_PER_CHAR = 0.08
+STRETCH_BASE_DUR = 0.15
+
+
+def detect_uniform_stretch(words: list[dict]) -> list[tuple[int, int]]:
+    """Index ranges of evenly-spread inflated runs (read-only)."""
+    ranges: list[tuple[int, int]] = []
+    i, n = 0, len(words)
+    while i < n:
+        if words[i]["end"] - words[i]["start"] < MIN_STRETCH_WORD_DUR:
+            i += 1
+            continue
+        j = i + 1
+        while (j < n and
+               words[j]["end"] - words[j]["start"] >= MIN_STRETCH_WORD_DUR):
+            j += 1
+        run = words[i:j]
+        if (len(run) >= MIN_STRETCH_WORDS
+                and run[-1]["end"] - run[0]["start"] >= MIN_STRETCH_SPAN):
+            deltas = [run[k + 1]["start"] - run[k]["start"]
+                      for k in range(len(run) - 1)]
+            mean = sum(deltas) / len(deltas)
+            if mean > 0 and (max(deltas) - min(deltas)) / mean <= STRETCH_INTERVAL_TOL:
+                ranges.append((i, j))
+        i = j
+    return ranges
+
+
+def _shrink_uniform_runs(words: list[dict],
+                         ranges: list[tuple[int, int]]) -> tuple[int, float]:
+    """Cap each inflated word by its character count; never move a start."""
+    changed, saved = 0, 0.0
+    for i, j in ranges:
+        for k in range(i, j):
+            w = words[k]
+            dur = w["end"] - w["start"]
+            cap = STRETCH_BASE_DUR + STRETCH_SEC_PER_CHAR * len(str(w["word"]))
+            if dur <= cap + 1e-6:
+                continue
+            next_start = (words[k + 1]["start"] if k + 1 < len(words)
+                          else w["end"])
+            new_end = min(w["start"] + cap, next_start)
+            if new_end <= w["start"]:
+                continue
+            saved += dur - (new_end - w["start"])
+            w["end"] = round(new_end, 3)
+            changed += 1
+    return changed, round(saved, 3)
+
+
+def _split_url_word(text: str):
+    """`thrivecosmeticscomjillian` -> ['thrivecosmetics.com', 'jillian'].
+
+    Only pure-ASCII alphanumeric strings longer than URL_WORD_CHARS with a
+    single domain token in the middle. Chinese (character-level stamps),
+    punctuation and ordinary long words are left alone.
+    """
+    if (len(text) <= URL_WORD_CHARS or not text.isascii()
+            or not text.isalnum()):
+        return None
+    low = text.lower()
+    for token in URL_TOKENS:
+        idx = low.find(token)
+        if low.count(token) != 1 or idx <= 3:
+            continue
+        tail = text[idx + len(token):]
+        if 3 <= len(tail) <= 12:
+            return [f"{text[:idx]}.{text[idx:idx + len(token)]}", tail]
+    return None
+
+
+def normalize_words(words: list[dict]):
+    """Single decision for Qwen3-ASR word-stamp cleanup (FR-39).
+
+    Returns (normalized_words, stats). Only abnormal words are touched:
+      1. zero-width + >30 chars  -> hallucinated duplicate, drop
+      2. zero-width run with a real gap -> linear interpolation by char count
+         inside [prev.end, next.start)
+      3. gap < MIN_INTERP_GAP   -> keep zero-width (no room; NEVER shift a
+         real neighbour timestamp to make room)
+      4. long ASCII URL-like token -> split into two words, proportional time
+      5. evenly-spread inflated run -> cap each duration by char count; starts,
+         order and word count never move (FR-41)
+    """
+    stats = {"dropped": 0, "interpolated": 0, "still_zero": 0, "split": 0,
+             "stretch_groups": 0, "stretched": 0, "stretch_seconds": 0.0}
+
+    # 1. Drop zero-width hallucinated duplicates.
+    kept: list[dict] = []
+    for w in words:
+        if w["start"] >= w["end"] and len(str(w["word"])) > HALLUCINATION_CHARS:
+            stats["dropped"] += 1
+            continue
+        kept.append(dict(w))
+
+    # 2. Split long URL-like tokens (aligned words only).
+    expanded: list[dict] = []
+    for w in kept:
+        parts = _split_url_word(str(w["word"])) if w["start"] < w["end"] else None
+        if not parts:
+            expanded.append(w)
+            continue
+        total = sum(len(p) for p in parts)
+        cursor = float(w["start"])
+        dur = float(w["end"]) - cursor
+        for i, part in enumerate(parts):
+            seg_start = cursor
+            cursor += dur * len(part) / total
+            seg_end = float(w["end"]) if i == len(parts) - 1 else cursor
+            expanded.append({"word": part,
+                             "start": round(seg_start, 3),
+                             "end": round(seg_end, 3)})
+        stats["split"] += 1
+
+    # 3. Interpolate zero-width runs only where a real gap exists.
+    i, n = 0, len(expanded)
+    while i < n:
+        if expanded[i]["start"] < expanded[i]["end"]:
+            i += 1
+            continue
+        j = i
+        while j < n and expanded[j]["start"] >= expanded[j]["end"]:
+            j += 1
+        left = expanded[i - 1]["end"] if i > 0 else expanded[i]["start"]
+        right = expanded[j]["start"] if j < n else expanded[i]["start"]
+        gap = right - left
+        if gap >= MIN_INTERP_GAP:
+            weights = [max(1, len(str(x["word"]))) for x in expanded[i:j]]
+            total = sum(weights)
+            cursor = float(left)
+            for k, x in enumerate(expanded[i:j]):
+                x["start"] = round(cursor, 3)
+                cursor += gap * weights[k] / total
+                x["end"] = (round(float(right), 3)
+                            if k == len(weights) - 1 else round(cursor, 3))
+                stats["interpolated"] += 1
+        else:
+            stats["still_zero"] += j - i
+        i = j
+
+    # 4. Evenly-spread inflated runs (FR-41): durations shrink, starts stay.
+    ranges = detect_uniform_stretch(expanded)
+    stretched, stretch_seconds = _shrink_uniform_runs(expanded, ranges)
+    stats["stretch_groups"] = len(ranges)
+    stats["stretched"] = stretched
+    stats["stretch_seconds"] = stretch_seconds
+
+    return expanded, stats
 
 
 def main() -> int:
@@ -153,6 +371,14 @@ def main() -> int:
         except RuntimeError as exc:
             log(f"ERROR: {exc}")
             return 5
+
+        words, stats = normalize_words(words)
+        log(f"[Qwen3-ASR] word normalize: dropped={stats['dropped']} "
+            f"interpolated={stats['interpolated']} "
+            f"still_zero={stats['still_zero']} split={stats['split']} "
+            f"stretch_groups={stats['stretch_groups']} "
+            f"stretched={stats['stretched']} "
+            f"stretch_seconds={stats['stretch_seconds']}")
 
         # Overlap belongs to the previous window: drop stamps inside the first
         # half of this window's overlap so boundary words are not duplicated.

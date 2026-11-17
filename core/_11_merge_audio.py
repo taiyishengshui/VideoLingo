@@ -63,32 +63,50 @@ def iter_segments(df, new_sub_times):
 def build_batch_filtergraph(batch, prev_end):
     """Pure builder: produce one ffmpeg filter_complex that assembles a single
     BATCH of segments on a local timeline, inserting silence gaps via a single
-    shared anullsrc input (so subtitle alignment is preserved).
+    anullsrc input (so subtitle alignment is preserved).
 
     `batch` is a list of (audio_file, start, end). `prev_end` is the global end
     time of the segment immediately before this batch (0.0 for the first).
     Returns (graph, new_prev_end, has_gap). The caller appends the anullsrc
     `-f lavfi -i anullsrc=...` input ONLY when has_gap is True (it then becomes
-    input index == len(batch), referenced by the [SIL0] node).
+    input index == len(batch)).
+
+    FR-40: each gap MUST consume its OWN branch of the silence source. ffmpeg
+    does not reliably fan out a label referenced by several `atrim` filters —
+    only the first branch stays silent, the rest pick up the first audio input
+    (so gaps replay the opening line, e.g. "男人在亲热一晚后"). We therefore
+    split the silence explicitly with `asplit=K` into [S0]..[S{K-1}] and give
+    gap #k the exclusive [Sk] branch.
     """
     n = len(batch)
     parts = []
     chain = []
     pe = prev_end
-    has_gap = False
+    # First pass: collect gaps. gap_branch[j] = (branch index, gap seconds).
+    gap_branch = {}
     for j, (audio, start, end) in enumerate(batch):
         gap = start - pe
         if gap > 0.001:
-            has_gap = True
-            parts.append("[SIL0]atrim=0:%.3f,asetpts=PTS-STARTPTS[sil%d]" % (gap, j))
+            gap_branch[j] = (len(gap_branch), gap)
+        pe = end
+    has_gap = bool(gap_branch)
+    k_count = len(gap_branch)
+    if has_gap:
+        if k_count == 1:
+            # Single consumer: no split needed (verified silent, rms=0).
+            parts.append("[%d:a]aformat=sample_fmts=s16:channel_layouts=mono[S0]" % n)
+        else:
+            labels = "".join("[S%d]" % i for i in range(k_count))
+            parts.append("[%d:a]aformat=sample_fmts=s16:channel_layouts=mono,"
+                         "asplit=%d%s" % (n, k_count, labels))
+    for j, (audio, start, end) in enumerate(batch):
+        if j in gap_branch:
+            branch, gap = gap_branch[j]
+            parts.append("[S%d]atrim=0:%.3f,asetpts=PTS-STARTPTS[sil%d]" % (branch, gap, j))
             chain.append("sil%d" % j)
         parts.append("[%d:a]aresample=%d,aformat=sample_fmts=s16:channel_layouts=mono,"
                      "asetpts=PTS-STARTPTS[clip%d]" % (j, SAMPLE_RATE, j))
         chain.append("clip%d" % j)
-        pe = end
-    if has_gap:
-        # anullsrc appended as the LAST input (index n); normalize once.
-        parts.insert(0, "[%d:a]aformat=sample_fmts=s16:channel_layouts=mono[SIL0]" % n)
     chain_str = "".join("[%s]" % c for c in chain)
     parts.append("%sconcat=n=%d:v=0:a=1[out]" % (chain_str, len(chain)))
     return ";".join(parts), pe, has_gap

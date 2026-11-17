@@ -49,6 +49,7 @@ SCHEMA: dict = {
     # subtitles
     "subtitle.max_length": ("单行字幕最大长度", "number", None),
     "subtitle.target_multiplier": ("字幕时长系数", "number", None),
+    "subtitle.source": ("第12步字幕源", "select", ["legacy", "unified"]),
     "max_split_length": ("切句长度阈值", "number", None),
     "min_subtitle_duration": ("最短字幕时长(秒)", "number", None),
     "tolerance": ("时间容差(秒)", "number", None),
@@ -92,7 +93,7 @@ GROUPS: list = [
                           "qwen3_asr.max_inference_batch_size",
                           "qwen3_asr.max_new_tokens", "qwen3_asr.device",
                           "qwen3_asr.dtype"]),
-    ("subtitle", "字幕与切句", ["subtitle.max_length", "subtitle.target_multiplier",
+    ("subtitle", "字幕与切句", ["subtitle.source", "subtitle.max_length", "subtitle.target_multiplier",
                                 "max_split_length", "min_subtitle_duration",
                                 "tolerance", "burn_subtitles", "ffmpeg_gpu",
                                 "summary_length", "reflect_translate",

@@ -32,7 +32,7 @@ from server.history_api import router as history_router
 from server.bili_api import router as bili_router
 from server.ad_api import router as ad_router
 from server.voice_api import router as voice_router
-from version import __version__
+from version import __version__, build_info
 
 # server/app.py lives at <root>/server/app.py -> project root is 2 dirs up
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -120,7 +120,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/version")
     def get_version():
-        return {"version": __version__}
+        return {"version": __version__, "build": build_info()}
 
     # ---------------- pipeline control ----------------
 

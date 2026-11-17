@@ -1,5 +1,6 @@
 import os, subprocess, time
 from core.utils.media_files import find_video_files
+from core.services.subtitle_source_service import subtitle_plan
 import cv2
 import numpy as np
 import platform
@@ -32,8 +33,6 @@ TRANS_BACK_COLOR = '&H33000000'
 
 OUTPUT_DIR = "output"
 OUTPUT_VIDEO = f"{OUTPUT_DIR}/output_sub.mp4"
-SRC_SRT = f"{OUTPUT_DIR}/src.srt"
-TRANS_SRT = f"{OUTPUT_DIR}/trans.srt"
     
 def check_gpu_available():
     try:
@@ -65,6 +64,9 @@ def merge_subtitles_to_video():
         rprint("[bold green]Placeholder video has been generated.[/bold green]")
         return
 
+    # FR-36: the subtitle set is decided once, in subtitle_source_service.
+    paths = {role: path for path, role in subtitle_plan("sub", OUTPUT_DIR)}
+    SRC_SRT, TRANS_SRT = paths["src"], paths["trans"]
     if not os.path.exists(SRC_SRT) or not os.path.exists(TRANS_SRT):
         # Do NOT call exit() here: this function runs inside the Streamlit
         # TaskRunner's background thread, where SystemExit would kill the

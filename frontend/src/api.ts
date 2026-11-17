@@ -35,11 +35,23 @@ export interface PipelineStatus {
   version?: string
 }
 
-/** 后端版本号（单一来源：项目根 version.py） */
-export async function getVersion(): Promise<string> {
+/** 后端版本号 + git 构建标识（单一来源：项目根 version.py，FR-37） */
+export interface BuildInfo {
+  hash: string
+  committed_at: string
+  dirty: boolean
+}
+
+export interface VersionInfo {
+  version: string
+  build?: BuildInfo
+}
+
+export async function getVersion(): Promise<VersionInfo> {
   const r = await fetch('/api/version')
   if (!r.ok) throw new Error(`GET /api/version ${r.status}`)
-  return (await r.json()).version ?? ''
+  const data = await r.json()
+  return { version: data.version ?? '', build: data.build }
 }
 
 /** 读取 output/ 下的日志文件内容（后端只允许 output/，不会越权） */

@@ -1,3 +1,4 @@
+import os
 import platform
 import subprocess
 
@@ -11,24 +12,46 @@ from core.utils import *
 from core.utils.models import *
 from core.utils.subprocess_log import run_logged
 from core.services.encode_service import build_encode_args
+from core.services.subtitle_source_service import subtitle_plan
 
 console = Console()
 
 DUB_VIDEO = "output/output_dub.mp4"
-DUB_SUB_FILE = 'output/dub.srt'
 DUB_AUDIO = 'output/dub.mp3'
 
+SRC_FONT_SIZE = 15
 TRANS_FONT_SIZE = 17
+FONT_NAME = 'Arial'
 TRANS_FONT_NAME = 'Arial'
 if platform.system() == 'Linux':
+    FONT_NAME = 'NotoSansCJK-Regular'
     TRANS_FONT_NAME = 'NotoSansCJK-Regular'
 if platform.system() == 'Darwin':
+    FONT_NAME = 'Arial Unicode MS'
     TRANS_FONT_NAME = 'Arial Unicode MS'
 
+SRC_FONT_COLOR = '&HFFFFFF'
+SRC_OUTLINE_COLOR = '&H000000'
+SRC_OUTLINE_WIDTH = 1
+SRC_SHADOW_COLOR = '&H80000000'
 TRANS_FONT_COLOR = '&H00FFFF'
 TRANS_OUTLINE_COLOR = '&H000000'
 TRANS_OUTLINE_WIDTH = 1 
 TRANS_BACK_COLOR = '&H33000000'
+
+
+def _subtitle_style(role):
+    """Style params only. WHICH subtitles to burn is decided by the service."""
+    if role == "src":
+        return (f"FontSize={SRC_FONT_SIZE},FontName={FONT_NAME},"
+                f"PrimaryColour={SRC_FONT_COLOR},OutlineColour={SRC_OUTLINE_COLOR},"
+                f"OutlineWidth={SRC_OUTLINE_WIDTH},ShadowColour={SRC_SHADOW_COLOR},"
+                f"BorderStyle=1")
+    return (f"FontSize={TRANS_FONT_SIZE},FontName={TRANS_FONT_NAME},"
+            f"PrimaryColour={TRANS_FONT_COLOR},OutlineColour={TRANS_OUTLINE_COLOR},"
+            f"OutlineWidth={TRANS_OUTLINE_WIDTH},BackColour={TRANS_BACK_COLOR},"
+            f"Alignment=2,MarginV=27,BorderStyle=4")
+
 
 def merge_video_audio():
     """Merge video and audio, and reduce video volume"""
@@ -64,11 +87,15 @@ def merge_video_audio():
     video.release()
     rprint(f"[bold green]Video resolution: {TARGET_WIDTH}x{TARGET_HEIGHT}[/bold green]")
     
-    subtitle_filter = (
-        f"subtitles={DUB_SUB_FILE}:force_style='FontSize={TRANS_FONT_SIZE},"
-        f"FontName={TRANS_FONT_NAME},PrimaryColour={TRANS_FONT_COLOR},"
-        f"OutlineColour={TRANS_OUTLINE_COLOR},OutlineWidth={TRANS_OUTLINE_WIDTH},"
-        f"BackColour={TRANS_BACK_COLOR},Alignment=2,MarginV=27,BorderStyle=4'"
+    # FR-36: single decision point. legacy -> one filter, byte-identical to
+    # the old hard-coded subtitle_filter; unified -> English + Chinese.
+    plan = subtitle_plan("dub", "output")
+    missing = [p for p, _ in plan if not os.path.isfile(p)]
+    if missing:
+        raise FileNotFoundError(f"Subtitle files for dubbing not found: {missing}")
+    subtitle_filter = ",".join(
+        f"subtitles={path}:force_style='{_subtitle_style(role)}'"
+        for path, role in plan
     )
     
     cmd = [

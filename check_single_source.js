@@ -199,6 +199,21 @@ const RULES = [
     msg: 'Qwen3-ASR runtime dispatch must live only in core/_2_asr.py — do not add a second ASR runtime decision',
   },
   {
+    id: 'qwen-word-normalize',
+    // FR-39/41: zero-width / hallucination / URL-split / uniform-stretch
+    // cleanup of ForcedAligner word stamps belongs to the isolated runner.
+    // audio_preprocess.py's "missing start/end -> zero-width placeholder" is a
+    // DIFFERENT concern (backends without word stamps) and must not grow a
+    // second interpolation or a second stretch detector.
+    home: 'core/asr_backend/qwen3_asr_runner.py',
+    pattern: /def\s+(?:normalize_words|_split_url_word|detect_uniform_stretch|_shrink_uniform_runs)\s*\(/g,
+    scan: ['core/**/*.py', 'server/**/*.py'],
+    allow: [
+      'core/asr_backend/qwen3_asr_runner.py',   // the home
+    ],
+    msg: 'Qwen3-ASR word-stamp normalization must live only in qwen3_asr_runner.py — do not add a second interpolation / hallucination policy',
+  },
+  {
     id: 'bili-meta-md-format',
     // FR-27 v1.37: bili_meta.md is the single source of truth for the last
     // generated copy. _render_md (write) and load_saved_bili_meta (read) must
@@ -211,6 +226,28 @@ const RULES = [
       'core/services/bili_meta_service.py',   // the home
     ],
     msg: 'bili_meta.md layout must live only in core/services/bili_meta_service.py (_render_md + load_saved_bili_meta) — never parse it in server/ or frontend/',
+  },
+  {
+    id: 'subtitle-source-decision',
+    // FR-36 v1.38: step 7 and step 12 used to hard-code their own subtitle
+    // lists. ONE service decides which srt each version burns; the English
+    // dubbing line is derived there, never in a numbered step.
+    home: 'core/services/subtitle_source_service.py',
+    pattern: /def\s+(?:subtitle_plan|build_dub_src_srt|parse_srt_blocks|format_srt_time)\s*\(|["']dub_src\.srt["']/g,
+    scan: ['core/**/*.py', 'server/**/*.py'],
+    allow: [
+      'core/services/subtitle_source_service.py',   // the home
+    ],
+    msg: 'subtitle source decision + dub_src.srt generation must live only in core/services/subtitle_source_service.py (FR-36)',
+  },
+  {
+    id: 'build-id-git-probe',
+    // FR-37 v1.39: only version.py may probe git for the build marker.
+    home: 'version.py',
+    pattern: /git\s+rev-parse|def\s+build_info\s*\(/g,
+    scan: ['core/**/*.py', 'server/**/*.py'],
+    allow: [],
+    msg: 'git build-id probe must live only in version.py — call build_info() instead of running git in a route (FR-37)',
   },
 ];
 
