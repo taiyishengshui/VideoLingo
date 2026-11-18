@@ -52,6 +52,18 @@ def test_reject_non_finite_and_invalid_rows():
         service.serialize_srt([base, {"start": -0.5, "end": 2, "text": "backwards"}])
 
 
+def test_serialize_and_save_allow_out_of_order_overlapping_rows(tmp_path: Path):
+    ws = _workspace(tmp_path)
+    rows = [
+        {"start": 5.0, "end": 7.0, "text": "Later first"},
+        {"start": 2.0, "end": 6.0, "text": "Earlier second"},
+    ]
+    track = service.read_track(str(ws), "src.srt", 10)
+    saved = service.save_track(str(ws), "src.srt", track["revision"], rows, 10)
+    assert saved["rows"] == rows
+    assert service.read_track(str(ws), "src.srt", 10)["rows"] == rows
+
+
 def test_revision_conflict_preserves_file(tmp_path: Path):
     ws = _workspace(tmp_path)
     path = ws / "output" / "src.srt"

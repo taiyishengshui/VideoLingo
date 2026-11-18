@@ -173,6 +173,11 @@ export default function SubtitlesPage() {
   const textRef = useRef<HTMLTextAreaElement>(null)
   const srcTextRef = useRef<HTMLTextAreaElement>(null)
   const transTextRef = useRef<HTMLTextAreaElement>(null)
+  const lastFocusedTextTrackRef = useRef<SubtitleTrackName | null>(null)
+  const splitCursorRef = useRef<Record<SubtitleTrackName, { row: number; position: number } | null>>({
+    'src.srt': null,
+    'trans.srt': null,
+  })
   const trackListRef = useRef<HTMLDivElement>(null)
   const rowElementsRef = useRef(new Map<number, HTMLDivElement>())
   const singlePlayRef = useRef<{ end: number } | null>(null)
@@ -306,12 +311,11 @@ export default function SubtitlesPage() {
   const timeBounds = (trackRows: SubtitleRow[], index: number, key: 'start' | 'end', value: number) => {
     const row = trackRows[index]
     const next = snapTime(value)
-    const nextRowStart = index < trackRows.length - 1 ? trackRows[index + 1].start : maxDuration
     const bounded = key === 'start'
-      ? Math.min(next, Math.max(0, row.end - frameSec), nextRowStart)
-      : Math.max(next, Math.min(maxDuration, row.start + frameSec))
+      ? Math.max(0, Math.min(next, row.end - frameSec))
+      : Math.min(maxDuration, Math.max(next, row.start + frameSec))
     const valid = key === 'start'
-      ? bounded >= 0 && bounded < row.end && bounded <= nextRowStart
+      ? bounded >= 0 && bounded < row.end
       : bounded > row.start && bounded <= maxDuration
     return { bounded, valid }
   }
@@ -338,11 +342,9 @@ export default function SubtitlesPage() {
     let counterpartRows: SubtitleRow[] | null = null
     if (canSync && counterpart) {
       const paired = timeBounds(counterpart.rows, selected, key, primary.bounded)
-      if (!paired.valid || Math.abs(paired.bounded - primary.bounded) > 1e-9) {
-        msgApi.error('另一轨对应字幕无法应用相同时间；两条轨道均未修改')
-        return false
+      if (paired.valid && Math.abs(paired.bounded - primary.bounded) <= 1e-9) {
+        counterpartRows = counterpart.rows.map((item, i) => i === selected ? { ...item, [key]: paired.bounded } : item)
       }
-      counterpartRows = counterpart.rows.map((item, i) => i === selected ? { ...item, [key]: paired.bounded } : item)
     }
     const nextRows = edited.rows.map((item, i) => i === selected ? { ...item, [key]: primary.bounded } : item)
     setTracks((old) => ({
@@ -352,6 +354,7 @@ export default function SubtitlesPage() {
     }))
     setDirty(true)
     if (syncTracks && !canSync) msgApi.warning('原文与译文轨道缺失或行数不同；本次仅修改当前轨道')
+    else if (syncTracks && !counterpartRows) msgApi.warning('另一轨无法应用相同时间；已仅修改当前轨道')
     setTimeDrafts((old) => ({
       ...old,
       [targetTrack]: { ...old[targetTrack], [key]: String(primary.bounded) },
@@ -385,15 +388,30 @@ export default function SubtitlesPage() {
       msgApi.error('分界时间必须同时位于原文与译文字幕的起止时间之间；两轨均未修改')
       return
     }
-    const splitText = (name: SubtitleTrackName, text: string) => {
-      const ref = name === 'src.srt' ? srcTextRef : transTextRef
-      const position = ref.current?.selectionStart ?? text.length
-      const left = text.slice(0, position).trim()
-      const right = text.slice(position).trim()
+    const primaryTrack = lastFocusedTextTrackRef.current ?? trackName
+    const primaryText = primaryTrack === 'src.srt' ? srcRow.text : transRow.text
+    const primaryCursor = splitCursorRef.current[primaryTrack]
+    const rawPrimaryPosition = primaryCursor?.row === selected
+      ? primaryCursor.position
+      : (primaryTrack === 'src.srt' ? srcTextRef.current?.selectionStart : transTextRef.current?.selectionStart) ?? 0
+    const primaryPosition = Math.min(primaryText.length, Math.max(0, rawPrimaryPosition))
+    const counterpartTrack: SubtitleTrackName = primaryTrack === 'src.srt' ? 'trans.srt' : 'src.srt'
+    const counterpartText = counterpartTrack === 'src.srt' ? srcRow.text : transRow.text
+    const counterpartCursor = splitCursorRef.current[counterpartTrack]
+    const counterpartPosition = counterpartCursor?.row === selected
+      ? counterpartCursor.position
+      : Math.round((primaryPosition / Math.max(1, primaryText.length)) * counterpartText.length)
+    const splitText = (text: string, position: number) => {
+      const boundedPosition = Math.min(text.length, Math.max(0, position))
+      const left = text.slice(0, boundedPosition).trim()
+      const right = text.slice(boundedPosition).trim()
       return left && right ? [left, right] : null
     }
-    const srcParts = splitText('src.srt', srcRow.text)
-    const transParts = splitText('trans.srt', transRow.text)
+    const positions: Record<SubtitleTrackName, number> = primaryTrack === 'src.srt'
+      ? { 'src.srt': primaryPosition, 'trans.srt': counterpartPosition }
+      : { 'src.srt': counterpartPosition, 'trans.srt': primaryPosition }
+    const srcParts = splitText(srcRow.text, positions['src.srt'])
+    const transParts = splitText(transRow.text, positions['trans.srt'])
     if (!srcParts || !transParts) {
       msgApi.error('原文与译文的光标两侧都必须有文字；两轨均未修改')
       return
@@ -452,11 +470,31 @@ export default function SubtitlesPage() {
 
   const save = async () => {
     if (!current) return
+    const saveNames: SubtitleTrackName[] = (['src.srt', 'trans.srt'] as const)
+      .filter((name) => tracks[name] !== null)
+    for (const name of saveNames) {
+      const track = tracks[name]
+      if (!track) continue
+      const invalidIndex = track.rows.findIndex((row) =>
+        !Number.isFinite(row.start) || !Number.isFinite(row.end) ||
+        row.start < 0 || row.end <= row.start || row.end > maxDuration + 0.05 ||
+        !row.text.trim())
+      if (invalidIndex >= 0) {
+        const row = track.rows[invalidIndex]
+        const problems = [
+          !Number.isFinite(row.start) ? `开始时间无效（${row.start}）` : row.start < 0 ? `开始时间为负数（${row.start}）` : '',
+          !Number.isFinite(row.end) ? `结束时间无效（${row.end}）` : row.end <= row.start ? `结束时间 ${row.end} 不晚于开始时间 ${row.start}` : row.end > maxDuration + 0.05 ? `结束时间 ${row.end} 超出媒体时长 ${maxDuration}` : '',
+          !row.text.trim() ? '字幕文本为空' : '',
+        ].filter(Boolean).join('；')
+        const text = `${TRACK_LABEL[name]}第 ${invalidIndex + 1} 条无效：${problems}`
+        setError(text)
+        msgApi.error(text)
+        return
+      }
+    }
     setSaving(true)
     setError('')
     try {
-      const saveNames: SubtitleTrackName[] = (['src.srt', 'trans.srt'] as const)
-        .filter((name) => tracks[name] !== null)
       let nextTracks = { ...tracks }
       for (const name of saveNames) {
         const track = nextTracks[name]
@@ -816,11 +854,27 @@ export default function SubtitlesPage() {
                 <Col xs={24} md={12}>
                   <Typography.Text strong style={{ display: 'block', marginBottom: 6 }}>原文 #{selected + 1}</Typography.Text>
                   <Input.TextArea ref={srcTextRef} rows={4} value={srcTrack?.rows[selected].text ?? ''}
+                    onFocus={(e) => {
+                      lastFocusedTextTrackRef.current = 'src.srt'
+                      splitCursorRef.current['src.srt'] = { row: selected, position: e.currentTarget.selectionStart }
+                    }}
+                    onSelect={(e) => {
+                      lastFocusedTextTrackRef.current = 'src.srt'
+                      splitCursorRef.current['src.srt'] = { row: selected, position: e.currentTarget.selectionStart }
+                    }}
                     onChange={(e) => editTrackText('src.srt', e.target.value)} />
                 </Col>
                 <Col xs={24} md={12}>
                   <Typography.Text strong style={{ display: 'block', marginBottom: 6 }}>译文 #{selected + 1}</Typography.Text>
                   <Input.TextArea ref={transTextRef} rows={4} value={transTrack?.rows[selected].text ?? ''}
+                    onFocus={(e) => {
+                      lastFocusedTextTrackRef.current = 'trans.srt'
+                      splitCursorRef.current['trans.srt'] = { row: selected, position: e.currentTarget.selectionStart }
+                    }}
+                    onSelect={(e) => {
+                      lastFocusedTextTrackRef.current = 'trans.srt'
+                      splitCursorRef.current['trans.srt'] = { row: selected, position: e.currentTarget.selectionStart }
+                    }}
                     onChange={(e) => editTrackText('trans.srt', e.target.value)} />
                 </Col>
               </Row>

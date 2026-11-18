@@ -82,7 +82,6 @@ def serialize_srt(rows: list[dict], duration: float | None = None) -> str:
     if not isinstance(rows, list):
         raise ValueError("rows must be a list")
     chunks = []
-    previous_start = -1.0
     for index, row in enumerate(rows, 1):
         try:
             if not isinstance(row, dict) or not {"start", "end", "text"}.issubset(row):
@@ -92,13 +91,12 @@ def serialize_srt(rows: list[dict], duration: float | None = None) -> str:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"invalid subtitle row {index}") from exc
         if (not math.isfinite(start) or not math.isfinite(end) or start < 0
-                or end <= start or not text or start < previous_start):
+                or end <= start or not text):
             raise ValueError(f"invalid time or text in subtitle row {index}")
         if _BLANK_LINE_IN_TEXT.search(text):
             raise ValueError(f"blank line inside subtitle text in row {index}")
         if duration is not None and end > duration + 0.05:
             raise ValueError(f"subtitle row {index} ends after source media duration")
-        previous_start = start
         chunks.append(f"{index}\n{format_srt_time(start)} --> {format_srt_time(end)}\n{text}")
     return "\n\n".join(chunks) + "\n" if chunks else ""
 
