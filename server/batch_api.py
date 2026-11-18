@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from core.batch_engine import ENGINE
 from core.utils.job_context import LOG_SUFFIX, batch_log_root
 from server.logbus import BUS
+from server.subtitle_edit_lock import EDIT_ADMISSION_LOCK
 
 # Re-bind the module-level engine's publisher to the LogBus so batch events
 # stream to the UI over the same /ws connection as pipeline logs.
@@ -60,26 +61,29 @@ def _media_exts() -> tuple[set, set]:
 @router.post("/scan")
 def scan(req: ScanRequest):
     root = os.path.abspath(req.root)
-    if os.path.isfile(root):
-        # single-file batch: the "root" is the file's parent dir and the
-        # scan contains exactly this one file
-        from core.utils.job_context import Job
-        parent = os.path.dirname(root)
-        job = Job(parent, root)
-        with ENGINE._lock:
-            ENGINE.root = parent
-            ENGINE.jobs = [job]
-        job.state.init_steps(ENGINE._step_ids())
-        return {"root": root, "log_root": batch_log_root(parent),
-                "files": [ENGINE._file_row(job)], "state": ENGINE.state}
-    if not os.path.isdir(root):
-        raise HTTPException(400, f"not a directory or media file: {root}")
-    try:
-        rows = ENGINE.scan(root)
-    except Exception as e:
-        raise HTTPException(500, f"scan failed: {e}")
-    return {"root": root, "log_root": batch_log_root(root), "files": rows,
-            "state": ENGINE.state}
+    with EDIT_ADMISSION_LOCK:
+        if ENGINE.state in ("running", "stopping"):
+            raise HTTPException(409, "batch is busy; cannot replace the scan")
+        if os.path.isfile(root):
+            # single-file batch: the "root" is the file's parent dir and the
+            # scan contains exactly this one file
+            from core.utils.job_context import Job
+            parent = os.path.dirname(root)
+            job = Job(parent, root)
+            with ENGINE._lock:
+                ENGINE.root = parent
+                ENGINE.jobs = [job]
+            job.state.init_steps(ENGINE._step_ids())
+            return {"root": root, "log_root": batch_log_root(parent),
+                    "files": [ENGINE._file_row(job)], "state": ENGINE.state}
+        if not os.path.isdir(root):
+            raise HTTPException(400, f"not a directory or media file: {root}")
+        try:
+            rows = ENGINE.scan(root)
+        except Exception as e:
+            raise HTTPException(500, f"scan failed: {e}")
+        return {"root": root, "log_root": batch_log_root(root), "files": rows,
+                "state": ENGINE.state}
 
 
 @router.post("/browse")
@@ -140,9 +144,10 @@ def start(req: StartRequest):
         for sid in (req.reset_from, req.reset_to):
             if sid is not None and sid not in valid:
                 raise HTTPException(404, f"unknown step: {sid}")
-    ok, msg = ENGINE.start(
-        req.files, force_restart=req.force_restart,
-        reset_from=req.reset_from, reset_to=req.reset_to)
+    with EDIT_ADMISSION_LOCK:
+        ok, msg = ENGINE.start(
+            req.files, force_restart=req.force_restart,
+            reset_from=req.reset_from, reset_to=req.reset_to)
     if not ok:
         raise HTTPException(409, msg)
     return {"ok": True, "message": msg}

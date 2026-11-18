@@ -59,7 +59,12 @@ export async function stopBatch(): Promise<void> {
   if (!r.ok) throw new Error(`stop failed: ${r.status}`)
 }
 
-export async function batchStatus(): Promise<{ state: string; root: string | null; current: string | null }> {
+export async function batchStatus(): Promise<{
+  state: string
+  root: string | null
+  current: string | null
+  files: { video: string; workspace: string }[]
+}> {
   const r = await fetch('/api/batch/status')
   if (!r.ok) throw new Error(`status failed: ${r.status}`)
   return r.json()

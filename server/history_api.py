@@ -19,6 +19,7 @@ from core.services.archive_service import archive_current, retry_locked
 from server.logbus import BUS
 from server.preview_stream import close_preview_streams
 from server.task_manager import MANAGER
+from server.subtitle_edit_lock import EDIT_ADMISSION_LOCK
 
 router = APIRouter(prefix="/api/history", tags=["history"])
 
@@ -67,7 +68,8 @@ def save_history(payload: dict | None = Body(None)):
             threading.Thread(target=_cleanup_locked, args=(locked,),
                              daemon=True, name="history-locked-cleanup").start()
 
-    ok, message = MANAGER.start_job("保存历史记录", job)
+    with EDIT_ADMISSION_LOCK:
+        ok, message = MANAGER.start_job("保存历史记录", job)
     if not ok:
         # 任务正在跑/暂停时不允许归档：产物还在被写，搬一半会两败俱伤
         raise HTTPException(409, f"当前有任务在运行，先停止再保存历史记录（{message}）")

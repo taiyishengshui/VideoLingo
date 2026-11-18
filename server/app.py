@@ -32,6 +32,8 @@ from server.history_api import router as history_router
 from server.bili_api import router as bili_router
 from server.ad_api import router as ad_router
 from server.voice_api import router as voice_router
+from server.subtitle_edit_api import router as subtitle_edit_router
+from server.subtitle_edit_lock import EDIT_ADMISSION_LOCK
 from version import __version__, build_info
 
 # server/app.py lives at <root>/server/app.py -> project root is 2 dirs up
@@ -176,8 +178,9 @@ def create_app() -> FastAPI:
                 " 的产物、断点与 LLM 缓存（翻译缓存也已失效，会重新翻译）"
             )})
 
-        ok, msg = MANAGER.start(
-            step_ids, before_start=prepare_force_run if req.force else None)
+        with EDIT_ADMISSION_LOCK:
+            ok, msg = MANAGER.start(
+                step_ids, before_start=prepare_force_run if req.force else None)
         if not ok:
             raise HTTPException(409, msg)
         return {"ok": True, "message": msg, "steps": step_ids}
@@ -209,6 +212,7 @@ def create_app() -> FastAPI:
     app.include_router(bili_router)
     app.include_router(ad_router)
     app.include_router(voice_router)
+    app.include_router(subtitle_edit_router)
 
     # ---------------- per-step log files (whitelist: output/ only) ----------------
 

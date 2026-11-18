@@ -119,11 +119,13 @@ def download_video(payload: dict = Body(...)):
 
     from core._1_ytdlp import download_video_ytdlp
     from server.task_manager import MANAGER
+    from server.subtitle_edit_lock import EDIT_ADMISSION_LOCK
 
     def job():
         download_video_ytdlp(url, save_path=_SAVE_PATH, resolution=resolution)
 
-    ok, m = MANAGER.start_job("下载视频", job)
+    with EDIT_ADMISSION_LOCK:
+        ok, m = MANAGER.start_job("下载视频", job)
     if not ok:
         raise HTTPException(409, m)
     return {"ok": True, "message": m}

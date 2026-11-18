@@ -433,3 +433,63 @@ export async function generateBiliMeta(body: {
   }
   return (await r.json()).result
 }
+
+/* ---------------- subtitle editing (FR-46) ---------------- */
+
+export type SubtitleTrackName = 'src.srt' | 'trans.srt'
+export type SubtitleScope = 'single' | 'batch'
+
+export interface SubtitleRow {
+  start: number
+  end: number
+  text: string
+}
+
+export interface SubtitleTrack {
+  name: SubtitleTrackName
+  revision: string
+  rows: SubtitleRow[]
+}
+
+export interface SubtitleContext {
+  scope: SubtitleScope
+  video: string | null
+  duration: number
+  fps: number
+  fps_source: 'auto' | 'fallback'
+  preview_url: string
+  tracks: Record<SubtitleTrackName, SubtitleTrack | null>
+}
+
+function subtitleQuery(scope: SubtitleScope, video?: string): string {
+  const q = new URLSearchParams({ scope })
+  if (video) q.set('video', video)
+  return q.toString()
+}
+
+export async function getSubtitleContext(
+  scope: SubtitleScope,
+  video?: string,
+): Promise<SubtitleContext> {
+  return unwrap<SubtitleContext>(
+    await fetch(`/api/subtitles/context?${subtitleQuery(scope, video)}`),
+    'GET /api/subtitles/context',
+  )
+}
+
+export async function saveSubtitleTrack(
+  name: SubtitleTrackName,
+  scope: SubtitleScope,
+  video: string | undefined,
+  revision: string,
+  rows: SubtitleRow[],
+): Promise<SubtitleTrack> {
+  return unwrap<SubtitleTrack>(await fetch(
+    `/api/subtitles/${encodeURIComponent(name)}?${subtitleQuery(scope, video)}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision, rows }),
+    },
+  ), `PUT /api/subtitles/${name}`)
+}
