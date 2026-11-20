@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
-  AutoComplete, Badge, Button, Card, Input, InputNumber, List, Modal, Popconfirm, Select,
+  AutoComplete, Badge, Button, Card, Collapse, Input, InputNumber, List, Modal, Popconfirm, Select,
   Space, Switch, Tag, Typography, message,
 } from 'antd'
 import {
@@ -108,16 +108,19 @@ async function putChains(chains: Record<string, { label: string; models: string[
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `put chains failed: ${r.status}`)
 }
 
-async function testModel(name: string): Promise<{
-  ok: boolean; reply?: string; error?: string; via?: string
+interface ModelTestResult {
+  ok: boolean; profile?: string; prompt?: string; reply?: string; error?: string; via?: string
   rotated?: boolean; dead_marked?: number[]; key_total?: number; key_index?: number
-}> {
+}
+
+async function testModel(name: string, prompt: string): Promise<ModelTestResult> {
   const r = await fetch('/api/models/test', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ profile: name }),
+    body: JSON.stringify({ profile: name, prompt }),
   })
-  if (!r.ok) throw new Error(`test failed: ${r.status}`)
-  return r.json()
+  const result = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(result.detail || `test failed: ${r.status}`)
+  return result
 }
 
 async function fetchModels(base_url: string, opts: { key?: string; endpoint?: string; useProxy?: boolean }): Promise<{ ok: boolean; models?: string[]; error?: string; hint?: string }> {
@@ -186,6 +189,9 @@ export default function ModelsPage() {
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
   const [chainEdit, setChainEdit] = useState<{ open: boolean; isNew: boolean; id: string; label: string }>({ open: false, isNew: true, id: '', label: '' })
   const [testing, setTesting] = useState('')
+  const [testDialog, setTestDialog] = useState<{ model: string; prompt: string } | null>(null)
+  const [testPrompt, setTestPrompt] = useState('Reply with the single word: ok')
+  const [testLogs, setTestLogs] = useState<ModelTestResult[]>([])
   const [modelOptions, setModelOptions] = useState<string[]>([])
   const [fetching, setFetching] = useState(false)
   const [useProxy, setUseProxy] = useState<boolean | undefined>(undefined)
@@ -363,24 +369,30 @@ export default function ModelsPage() {
     setModelEdit(EMPTY_MODEL)
   }, `模型 ${modelEdit.name} 已保存`)
 
-  const doTest = (name: string) => {
-    setTesting(name)
-    testModel(name)
-      .then((res) => {
-        if (res.ok) {
-          const rotatedNote = res.rotated
-            ? `（跳过并标记了失效 key #${res.dead_marked?.join(', #')}，当前 key #${res.key_index}/${res.key_total}）`
-            : ''
-          msgApi.success(`${name} 连通 ✓ 回复: ${res.reply}（${res.via === 'proxy' ? '走代理' : '直连'}）${rotatedNote}`)
-        } else {
-          const deadNote = res.dead_marked?.length
-            ? `已标记失效 key #${res.dead_marked.join(', #')}（共 ${res.key_total} 个）。`
-            : ''
-          msgApi.error(`${name} 失败: ${res.error} ${deadNote}`)
-        }
-      })
-      .catch((e) => msgApi.error(String(e)))
-      .finally(() => setTesting(''))
+  const openTest = (name: string) => {
+    setTestPrompt('Reply with the single word: ok')
+    setTestDialog({ model: name, prompt: 'Reply with the single word: ok' })
+  }
+
+  const doTest = async () => {
+    if (!testDialog || !testPrompt.trim()) {
+      msgApi.warning('请输入测试请求内容')
+      return
+    }
+    const { model } = testDialog
+    const prompt = testPrompt
+    setTesting(model)
+    try {
+      const result = await testModel(model, prompt)
+      setTestLogs((logs) => [{ ...result, profile: model, prompt }, ...logs])
+      if (result.ok) msgApi.success(`${model} 测试成功`)
+      else msgApi.error(`${model} 测试失败: ${result.error || '未知错误'}`)
+    } catch (e) {
+      setTestLogs((logs) => [{ ok: false, profile: model, prompt, error: String(e) }, ...logs])
+      msgApi.error(String(e))
+    } finally {
+      setTesting('')
+    }
   }
 
   const doFetchModels = async () => {
@@ -506,7 +518,7 @@ export default function ModelsPage() {
               <List.Item
                 actions={[
                   <Button key="t" size="small" icon={<ApiOutlined />}
-                    loading={testing === name} onClick={() => doTest(name)}>
+                    loading={testing === name} onClick={() => openTest(name)}>
                     测试
                   </Button>,
                   <Button key="e" size="small" icon={<EditOutlined />}
@@ -875,6 +887,49 @@ export default function ModelsPage() {
               options={[{ value: 'enabled', label: 'enabled' }, { value: 'disabled', label: 'disabled' }]}
               onChange={(v) => setModelEdit({ ...modelEdit, thinking_type: v ?? '' })} />
           </Space>
+        </Space>
+      </Modal>
+
+      <Modal
+        open={!!testDialog}
+        title={testDialog ? `测试模型 ${testDialog.model}` : '测试模型'}
+        onCancel={() => setTestDialog(null)}
+        onOk={doTest}
+        okText="发送测试请求"
+        cancelText="关闭"
+        confirmLoading={!!testing}
+        width={720}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={12}>
+          <div>
+            <Typography.Text strong>测试请求</Typography.Text>
+            <Input.TextArea
+              value={testPrompt}
+              onChange={(e) => setTestPrompt(e.target.value)}
+              autoSize={{ minRows: 3, maxRows: 10 }}
+              placeholder="输入要发送给模型的内容"
+            />
+          </div>
+          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+            <Typography.Text strong>测试日志</Typography.Text>
+            <Button size="small" onClick={() => setTestLogs([])} disabled={!testLogs.length}>清空日志</Button>
+          </Space>
+          {!testLogs.length && <Typography.Text type="secondary">尚无测试记录</Typography.Text>}
+          {testLogs.map((log, index) => (
+            <Card key={`${log.profile}-${index}`} size="small" style={{ width: '100%' }}>
+              <Space wrap style={{ marginBottom: 8 }}>
+                <Tag color={log.ok ? 'green' : 'red'}>{log.ok ? '成功' : '失败'}</Tag>
+                <Typography.Text strong>{log.profile}</Typography.Text>
+                {log.via && <Tag>{log.via === 'proxy' ? '代理' : '直连'}</Tag>}
+                {log.key_total !== undefined && <Tag>Key {log.key_index ?? 1}/{log.key_total}</Tag>}
+                {!!log.dead_marked?.length && <Tag color="orange">失效 Key #{log.dead_marked.join(', #')}</Tag>}
+              </Space>
+              <Collapse size="small" items={[
+                { key: 'request', label: '请求内容', children: <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', margin: 0 }}>{log.prompt}</pre> },
+                { key: 'response', label: log.ok ? '模型返回' : '错误详情', children: <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', margin: 0 }}>{log.ok ? log.reply : log.error}</pre> },
+              ]} />
+            </Card>
+          ))}
         </Space>
       </Modal>
 

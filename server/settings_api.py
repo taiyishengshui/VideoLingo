@@ -24,6 +24,8 @@ SCHEMA: dict = {
     "target_language": ("目标语言", "select",
                         ["简体中文", "繁体中文", "English", "日本語", "한국어"]),
     "max_workers": ("并发工作线程", "number", None),
+    # FR-64/v1.66: per-call output budget; reasoning models may need 8192+
+    "llm.max_tokens": ("LLM 单次输出上限 (max_tokens)", "number", None),
     # whisper / ASR
     "whisper.model": ("Whisper 模型", "select",
                       ["tiny", "base", "small", "medium", "large-v2", "large-v3"]),
@@ -81,7 +83,8 @@ SCHEMA: dict = {
 }
 
 GROUPS: list = [
-    ("general", "通用", ["display_language", "target_language", "max_workers"]),
+    ("general", "通用", ["display_language", "target_language", "max_workers",
+                         "llm.max_tokens"]),
     ("network", "网络代理", ["network.proxy_mode", "network.proxy_url",
                              "network.no_proxy"]),
     ("asr", "转录 ASR", ["whisper.model", "whisper.language", "whisper.runtime",
@@ -152,6 +155,13 @@ def put_settings(req: SettingsUpdate):
                 continue
         elif typ == "text":
             v = "" if v is None else str(v).strip()
+        # FR-64/v1.66: keep the settings boundary aligned with llm_profiles
+        # validation — a 0/negative/fractional budget would recreate the
+        # reasoning-consumes-everything empty-reply failure.
+        if k == "llm.max_tokens" and (
+                isinstance(v, bool) or not isinstance(v, int) or v < 1):
+            rejected.append(f"{k}: must be a positive integer")
+            continue
         try:
             if not update_key(k, v):
                 rejected.append(f"{k}: update failed")
@@ -164,6 +174,7 @@ def put_settings(req: SettingsUpdate):
 
 class LlmTestRequest(BaseModel):
     profile: str
+    prompt: str = "Reply with the single word: ok"
 
 
 @router.post("/test-llm")
@@ -174,8 +185,11 @@ def test_llm(req: LlmTestRequest):
     dead -> rotate) live in core/services/llm_service.probe_pool, the same
     code path the pipeline uses."""
     from core.services.llm_service import probe_pool
-    result = probe_pool(req.profile)
+    if not req.prompt.strip():
+        raise HTTPException(400, "测试请求不能为空")
+    result = probe_pool(req.profile, prompt=req.prompt)
     result.setdefault("profile", req.profile)
+    result["prompt"] = req.prompt
     if result.get("ok") is False and "error" not in result:
         raise HTTPException(404, result.get("message", "profile not found"))
     return result

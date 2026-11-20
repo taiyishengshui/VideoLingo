@@ -238,8 +238,8 @@ def create_text_response(client, api_type, model, prompt, *, max_tokens,
     return client.chat.completions.create(**params)
 
 
-def probe(profile: dict, key: str, timeout: int = 15) -> tuple:
-    """One cheap round-trip with ONE key: 'Reply with the single word: ok'.
+def probe(profile: dict, key: str, timeout: int = 15, prompt: str = "Reply with the single word: ok") -> tuple:
+    """One cheap round-trip with ONE key and a caller-selected prompt.
 
     Honors the global network policy (direct/proxy/auto with fallback).
     Returns (ok, result_dict, status_code_or_None):
@@ -262,7 +262,6 @@ def probe(profile: dict, key: str, timeout: int = 15) -> tuple:
         clients["proxy"] = net_policy.make_openai_client(
             key, base_url, "proxy", timeout)
 
-    prompt = "Reply with the single word: ok"
     api_type = profile.get("api_type", "chat_completions")
     # Connectivity probes must stay cheap; never enable reasoning here.
     probe_thinking = "disabled" if profile.get("thinking_type") else None
@@ -276,7 +275,7 @@ def probe(profile: dict, key: str, timeout: int = 15) -> tuple:
             content, err = check_response(resp, api_type=api_type)
             if err:
                 return False, {"error": err, "via": label}, None
-            return True, {"reply": (content or "").strip()[:50], "via": label,
+            return True, {"reply": (content or "").strip(), "via": label,
                           "policy": mode}, None
         except APIStatusError as e:
             last_err = f"[{label}] {str(e)[:200]}"
@@ -286,7 +285,7 @@ def probe(profile: dict, key: str, timeout: int = 15) -> tuple:
     return False, {"error": last_err, "policy": mode}, status
 
 
-def probe_pool(profile: dict) -> dict:
+def probe_pool(profile: dict, prompt: str = "Reply with the single word: ok") -> dict:
     """Test-button entry point: walk the profile's key pool.
 
     401/402/403 -> key marked permanently dead -> next key automatically
@@ -305,7 +304,7 @@ def probe_pool(profile: dict) -> dict:
     endpoint = prof.get("endpoint", prof["name"])
     dead_marked = []
     for ki, key in enumerate(keys):
-        ok, result, status = probe(prof, key)
+        ok, result, status = probe(prof, key, prompt=prompt)
         if ok:
             if dead_marked:
                 result["rotated"] = True

@@ -893,6 +893,22 @@ Header 全局按钮：「重启后端服务」「停止后端服务」（均二�
 - **验收要点**：① 第二轨存在非法记录时，第一轨 API 保存也不得发起；② 报错包含具体轨道、行号与字段/值；③ 倒序或重叠但每行自身合法的字幕仍可保存；④ 构建、字幕专项 pytest、单源守卫及 diff 检查通过。
 - **阶段边界**：按 A→B→C 执行；先登记本需求及 v1.61，再修改前端并回填真实验证结果；AI 不自动提交。
 
+### FR-65 模型测试支持自定义请求与过程日志（已实现）
+
+- **需求/任务**（用户 2026-11-20）：在 `#/models` 模型测试中允许用户填写本次测试请求文本，并在页面展示可追溯的请求与返回日志，便于核对实际发送内容和模型响应。
+- **当前行为**：模型页测试按钮只发送模型名；后端探针固定使用 `Reply with the single word: ok`，前端只通过 toast 展示简短成功/失败摘要，不保留请求及完整返回内容。该条已实现：测试弹窗提供可编辑请求并在当前页面会话中记录请求、完整响应或错误，以及可用的网络/key 轮换摘要。
+- **约束（不变式）**：① 使用现有 `/api/models/test` 入口及模型的 `api_type`、`thinking_type`、endpoint/key 配置，不另建测试协议或绕过 `core/services/llm_service.py`；② `probe_pool()` 现有 key 池轮换、401/402/403 失效标记及网络策略保持不变；③ 探针仍限制低成本输出预算，不继承 `llm.max_tokens`；④ 日志展示用户输入的原始请求文本、模型/协议、完整成功响应或错误、请求结果及可用的网络路径/key 池轮换摘要，不展示 API key；⑤ 请求输入为空或仅空白时前端阻止发送，后端也拒绝空白内容；⑥ 测试记录仅保存在页面会话状态，不写入配置、项目日志或持久化文件，不自动重试或重复发出请求。
+- **验收要点**：① 用户可在模型页测试前输入/修改请求文本；② 后端实际把该文本传给所选模型，Responses 与 Chat Completions 均沿现有适配器工作；③ 成功响应完整呈现，失败时请求文本与错误详情仍留在页面；④ key 池轮换、失效标记及单次低预算行为保持；⑤ 补充服务层/API 测试覆盖自定义输入、空输入拒绝、成功/失败日志字段且不请求真实供应商；⑥ 前端类型检查/生产构建、相关 pytest、`node check_single_source.js`、`git diff --check` 通过。
+- **阶段边界**：按 A→B→C 执行；先登记本 FR 与 v1.67 需求行，再修改；C 阶段回填真实实现及验证，提醒用户重启 `python -m server`；AI 不自动提交。
+
+### FR-64 LLM 单次输出上限可配置（待实现）
+
+- **需求/任务**（用户 2026-11-20）：用户提供 MClaw 网关日志：`blian_deepseek_v4_pro` 在 4096 token 输出预算内把全部额度用于推理，正文为空，网关返回 502。要求把 `max_tokens` 提为可配置项 `llm.max_tokens`，默认 8192，并可在设置页修改，避免每次调用只能改代码。
+- **当前行为**：`core/utils/ask_gpt.py` 在 `_call_once()` 中硬编码 `max_tokens: 4096`；`core/utils/llm_profiles.py` 只解析 `llm.retries_per_model`，不处理输出上限；`config.yaml` 无 `llm.max_tokens`；设置页 `SCHEMA` 未暴露该项。
+- **约束（不变式）**：① 解析、校验与默认值唯一归属 `core/utils/llm_profiles.py`，`ask_gpt` 每次调用读取，禁止第二份硬编码；② 仅接受正整数，缺省（键不存在）取 8192，非法值在配置加载与设置保存边界明确拒绝，不静默回退；③ 连通性探针仍固定 32 token，不随该配置放大；④ 不改模型级 `api_type` / `thinking_type` 语义，也不改响应校验、缓存、重试、key 轮换与 429 限流等待；⑤ 本地自动化不得向真实供应商发请求；⑥ 按 A→B→C 执行，需求行落盘前不碰代码。
+- **验收要点**：① `config.yaml` 显式设置值进入 Chat Completions 的 `max_tokens` 与 Responses 的 `max_output_tokens`；② 无该键时默认 8192；③ 0、负数、非整数在 `load_llm_config()` 与 `PUT /api/settings` 均被拒绝；④ 设置页可见并可修改，修改后不重启进程即时生效；⑤ 专项与全量 pytest、`node check_single_source.js`、前端类型检查/生产构建、`git diff --check` 通过。
+- **阶段边界**：按 A→B→C 执行；v1.66 先登记后实现；AI 不自动提交。
+
 ### FR-63 流水线广告预览手动加载双轨字幕（已实现，真实视频交互待验收）
 
 - **需求/任务**（用户 2026-11-20）：在 pipeline 页面广告视频预览区域，可手动加载原文字幕和译文字幕，以便直接核验广告时间是否正确。
@@ -924,13 +940,14 @@ Header 全局按钮：「重启后端服务」「停止后端服务」（均二�
 
 ## 7. 配置总表（`config.yaml`）
 
-> 「设置页」= `server/settings_api.py SCHEMA` 白名单（30 键，v1.24 起含 `index_tts.*` 5 项）；其余只能手改文件。标 ★ 的是常被手改的关键项。「当前值」以仓库默认 / 新装默认为准；用户本机 `config.yaml`（被 gitignore）现为 `tts_method: index_tts`、`index_tts.refer_mode: 4`，见 FR-33/34。
+> 「设置页」= `server/settings_api.py SCHEMA` 白名单（31 键，v1.24 起含 `index_tts.*` 5 项，v1.66 起含 `llm.max_tokens`）；其余只能手改文件。标 ★ 的是常被手改的关键项。「当前值」以仓库默认 / 新装默认为准；用户本机 `config.yaml`（被 gitignore）现为 `tts_method: index_tts`、`index_tts.refer_mode: 4`，见 FR-33/34。
 
 | 段 / 键 | 当前值 | 设置页 | 作用 |
 |---|---|---|---|
 | `display_language` | `zh-CN` | ✔ | 界面语言 |
 | `target_language` | `简体中文` | ✔ | 写入提示词的目标语言 |
 | `max_workers` | `4` | ✔ | 步骤内部 LLM/字幕并发（**不是**批量并发） |
+| ★ `llm.max_tokens` | `8192` | ✔ | 单次 LLM 调用输出上限；推理型模型需调到 8192+ 才有正文预算（FR-64，v1.66），连通性探针固定 32 不受影响 |
 | `demucs` | `false` | ✔ | 转录前是否做人声分离 |
 | ★ `burn_subtitles` | `true` | ✔ | 决定默认结束步骤（FR-05）；关时第 7/12 步只写 0 秒黑帧占位 |
 | `ffmpeg_gpu` | `true` | ✔ | h264_nvenc 加速 |
@@ -1167,6 +1184,8 @@ Header 全局按钮：「重启后端服务」「停止后端服务」（均二�
 
 | 版本 | 日期 | 涉及 FR | 改动摘要 | 验证 |
 |---|---|---|---|---|
+| v1.67 | 2026-11-20 | FR-65（新增）、`server/models_api.py`、`server/settings_api.py`、`core/services/llm_service.py`、`frontend/src/pages/ModelsPage.tsx`、`test/test_models_api.py`、`test/test_ask_gpt_chain.py` | **需求/任务**：模型测试允许用户填写请求文本并在页面保留请求/响应过程日志；复用现有协议、网络策略和 key 池轮换，保持低成本探针预算，不持久化日志、不展示 API key。**执行/结果**：探针 `probe()` / `probe_pool()` 接受自定义请求并维持 32 token 预算与 key 轮换；模型测试 API 验证非空请求、回传原文和完整回复；模型页添加会话内请求/响应/错误记录及网络/key 摘要，无 API key；测试覆盖 API 空请求拒绝、自定义请求传递和 Responses 协议参数。未提交。 | 定向 pytest 31 passed；全量 pytest 首轮 837 passed、1 skipped，唯一失败是本行仍为待填的阶段 C 守卫，回填后待复跑；前端 `npm --prefix frontend run build`（含 tsc）通过，3045 modules，bundle 1,247.57 kB（>500 kB 警告）；`node check_single_source.js` clean；`git diff --check` 通过（仅 LF→CRLF 提示）。未请求真实供应商；后端 API 改动需重启 `python -m server`。 |
+| v1.66 | 2026-11-20 | FR-64（新增）、`core/utils/ask_gpt.py`、`core/utils/llm_profiles.py`、`server/settings_api.py`、`config.yaml`、`test/test_llm_max_tokens.py` | **需求/任务**：把 LLM 单次输出上限从 `ask_gpt` 硬编码 4096 提为 `llm.max_tokens`（默认 8192），修复推理型模型在 4096 token 内耗尽预算、正文为空导致 502 的问题；配置解析/校验唯一归属 `llm_profiles`，设置页可改，探针仍固定 32 token。**执行/结果**：`llm_profiles.py` 新增 `_resolve_max_tokens()` 与 `max_output_tokens()`，负责默认值、正整数校验与每次调用重新读配置；`ask_gpt.py` 的 Chat Completions `max_tokens` / Responses `max_output_tokens` 改由该函数提供；本机 `config.yaml`（被 gitignore）加入 `llm.max_tokens: 8192`，缺键时代码默认 8192；`settings_api.py` 在通用组暴露该键并在 PUT 边界拒绝非正整数；`test/test_llm_max_tokens.py` 新增默认/即时生效/两协议/非法值/探针/设置页共 9 例，`test_ask_gpt_chain.py` 原 4096 断言改为 8192。未发真实供应商请求。 | 回填前全量 pytest：835 passed、1 skipped，唯一失败为本行阶段 C 守卫；回填后复跑全量 pytest：836 passed、1 skipped。专项 9 例全通过；`node check_single_source.js` clean；4 个改动 py 的 `py_compile` 通过；前端 `tsc --noEmit` + `vite build` 通过（3045 modules；bundle 1,235.25 kB，>500 kB 警告）；`git diff --check` 通过（仅 LF→CRLF 提示）。 |
 | v1.65 | 2026-11-20 | FR-63、`frontend/src/pages/PipelinePage.tsx` | **需求/任务**：在流水线广告视频预览中，提供手动读取并显示当前单任务工作区的原文/译文字幕，以核对广告时间；复用现有字幕读取接口，只读，不修改字幕文件、EDL、播放头或流水线，不自动运行步骤；支持两轨独立加载/显示及缺失状态提示。**执行/结果**：预览区增加双轨独立加载/显示控件及按播放头同步的字幕叠层；切换预览源清除字幕，异步加载校验源键；只读复用现有接口，无后端改动。未提交。 | TypeScript 检查通过；生产构建通过（3045 modules；bundle 1,235.25 kB，>500 kB 警告）；`node check_single_source.js` clean；`git diff --check` 通过。浏览器已打开 pipeline 页面，但当前工作区无可预览视频，无法验收加载按钮、播放同步及窄屏叠层；需在有可预览视频的工作区复验。 |
 | v1.64 | 2026-11-20 | FR-62（新增）、`frontend/src/pages/SubtitlesPage.tsx` | **需求/任务**：字幕双轨拆分分自动与手动两类：当前选中配对行未手动修改文本/时间且未填写拆分时间时，分界必须严格位于原文与译文时间区间交集内部；手动编辑当前配对行任一轨文本/时间，或显式填写拆分时间时，可在双轨交集外按光标位置及拆分点切分。手动拆分后，前半句结束于拆分点；若拆分点晚于后半句原开始时间，则后半句开始与结束时间均设为拆分点，允许零时长；若拆分点晚于紧随其后的字幕行开始时间，则该后续行开始时间同步设为拆分点。手动把当前句结束时间改到超过下一句开始时间时，下一句开始时间自动跟到当前句结束时间；原文、译文分别按各自时间执行。零时长仅允许于上述手动拆分/推进行为产生，保存校验不得拒绝零时长，但仍拒绝负时长、越界时间、空文本；失败时两轨均不修改。播放头单纯移动不算手动编辑。**执行/结果**：前端区分自动/手动拆分；自动拆分检查同一分界严格位于双轨区间交集内，手动/显式拆分统一采用不早于两轨当前行起点的共同边界，不能满足媒体范围时双轨不修改。手动拆分按边界推进拆分后字幕及后续字幕，允许零时长；结束时间越过下一行时同步推进下一行起点并防止负时长。时间联动无法同时应用时原子拒绝；零时长后端 SRT 读写仅在有媒体时长时支持，负时长仍拒绝。播放头移动不改变人工编辑标记。未提交。 | 前端 `npm --prefix frontend run build` 通过（3045 modules；bundle 1,233.50 kB，存在 >500 kB 警告）；`node check_single_source.js` clean；`git diff --check` 通过。`python -m pytest test/test_subtitle_edit.py -q` 未运行成功：当前 Python 3.13.12 环境缺少 pytest；仓库内未找到项目 pytest 可执行文件。 |
 | v1.63 | 2026-11-20 | FR-61 | **需求/任务**：在字幕页复用单任务广告 EDL 数据，直接选择广告段并跳到广告开始/结束时间，不必切换页面查时间；跳转不改字幕选择、草稿或保存状态，批处理工作区不套用单任务广告时间。**执行/结果**：字幕页增加广告段下拉选择，切换时直接跳到所选广告开始时间，并提供开始/结束独立跳转；有效段按时间过滤，批处理模式及 EDL 不可用状态显示明确提示。仅调整视频时间与播放头，未改字幕草稿、选择、dirty 状态或 EDL。真实浏览器交互待用户验收；未提交。 | `npm --prefix frontend run build` 通过（3045 modules；bundle 1,232.44 kB，存在 >500 kB 体积警告）；`npm --prefix frontend exec -- tsc --project frontend/tsconfig.json --noEmit` 通过；`node check_single_source.js` clean；`git diff --check` 通过。真实浏览器跳转尚未验收。 |
@@ -1279,8 +1298,8 @@ Header 全局按钮：「重启后端服务」「停止后端服务」（均二�
 | | `core/utils/subtitle_time.py` | `get_sentence_timestamps`、`_find_anchor`、`_build_groups`、`align_timestamp`、锚点常量 |
 | | `core/asr_backend/vad_gap_fill.py` | `NoVad`、`fill_gaps`、`find_uncovered_gaps`、`speech_ratio`、`transcribe_unprompted`、`_unprompted`、`_sequential_retry`、`prompt_echo`、`looks_like_hallucination` |
 | | `core/translate_lines.py` | `translate_lines`、`normalize_sub_keys`、`valid_translate_result` |
-| 工具 | `core/utils/ask_gpt.py` | `ask_gpt`、`_call_once`、`_load_cache` |
-| | `core/utils/llm_profiles.py` | `load_llm_config`、`get_profile_chain`、`mark_key_dead`、`parse_key_file` |
+| 工具 | `core/utils/ask_gpt.py` | `ask_gpt`、`_call_once`、`_load_cache`；输出上限每次调用经 `llm_profiles.max_output_tokens()` 读取（FR-64） |
+| | `core/utils/llm_profiles.py` | `load_llm_config`、`get_profile_chain`、`max_output_tokens`、`mark_key_dead`、`parse_key_file` |
 | | `core/utils/config_utils.py` | `load_key`、`update_key`、`CONFIG_PATH` |
 | | `core/utils/job_context.py` | `workspace_for`、`JobState`、`Job`、`delete_step_artifacts` |
 | | `core/utils/subprocess_log.py` | `run_logged`、`_emit`（回灌 + `log_hooks.emit`，FR-31） |

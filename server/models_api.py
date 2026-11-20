@@ -334,10 +334,13 @@ def put_chains(req: ChainsUpdate):
 
 class TestRequest(BaseModel):
     profile: str   # model entry name
+    prompt: str
 
 
 @router.post("/test")
 def test_profile(req: TestRequest):
+    if not req.prompt.strip():
+        raise HTTPException(400, "测试请求不能为空")
     from server.settings_api import test_llm as _test
     return _test(req)
 

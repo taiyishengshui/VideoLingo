@@ -123,7 +123,7 @@ def test_responses_profile_dispatches_and_extracts_json(chain_cfg, tmp_cwd, fake
     assert request[0]["content"] == "prompt-responses"
     assert request[0]["role"] == "user"
     params = next(call[2] for call in calls if call[0] == "gpt-mini")
-    assert params["max_output_tokens"] == 4096
+    assert params["max_output_tokens"] == 8192  # FR-64/v1.66 default
     assert params["text"] == {"format": {"type": "json_object"}}
     assert "messages" not in params and "max_tokens" not in params
 
@@ -400,18 +400,19 @@ def test_responses_probe_dispatches_and_checks_output(monkeypatch):
     monkeypatch.setattr(net_policy, "make_openai_client",
                         lambda *args, **kwargs: client)
 
+    custom_prompt = "Return a detailed explanation, not just a connectivity token."
     ok, result, status = llm_service.probe({
         "base_url": "https://api.example.com/v1",
         "model": "gpt-responses",
         "api_type": "responses",
         "thinking_type": "enabled",
-    }, "test-key")
+    }, "test-key", prompt=custom_prompt)
 
     assert ok is True
     assert result["reply"] == "ok"
     assert status is None
     params = next(call[2] for call in calls if call[0] == "gpt-responses")
-    assert params["input"] == [{"role": "user", "content": "Reply with the single word: ok"}]
+    assert params["input"] == [{"role": "user", "content": custom_prompt}]
     assert params["max_output_tokens"] == 32
     assert params["reasoning"] == {"effort": "none"}
     assert "messages" not in params and "max_tokens" not in params

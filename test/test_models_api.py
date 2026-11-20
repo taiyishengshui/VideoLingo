@@ -126,3 +126,40 @@ def test_model_api_rejects_unknown_api_type(client):
     })
     assert r.status_code == 400
     assert "api_type" in r.json()["detail"]
+
+
+@pytest.fixture
+def model_test_client(cfg_path, monkeypatch):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    import server.app as app_mod
+    import server.models_api as api
+
+    p = cfg_path(CHAIN_CONFIG)
+    monkeypatch.setattr(api, "CONFIG_PATH", str(p))
+    with TestClient(app_mod.create_app()) as c:
+        yield c
+
+
+def test_model_test_passes_custom_prompt_and_returns_full_reply(model_test_client, monkeypatch):
+    import core.services.llm_service as svc
+    seen = {}
+
+    def fake_probe_pool(profile, prompt):
+        seen.update(profile=profile, prompt=prompt)
+        return {"ok": True, "reply": "A complete model response", "via": "direct", "key_total": 1}
+
+    monkeypatch.setattr(svc, "probe_pool", fake_probe_pool)
+    prompt = "Please explain this request in detail."
+    response = model_test_client.post("/api/models/test", json={"profile": "mini", "prompt": prompt})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["reply"] == "A complete model response"
+    assert response.json()["prompt"] == prompt
+    assert seen == {"profile": "mini", "prompt": prompt}
+
+
+def test_model_test_rejects_blank_prompt(model_test_client):
+    response = model_test_client.post("/api/models/test", json={"profile": "mini", "prompt": "  \n"})
+    assert response.status_code == 400
+    assert "不能为空" in response.json()["detail"]
