@@ -98,6 +98,36 @@ def test_first_profile_succeeds_without_walking(chain_cfg, tmp_cwd, fake_llm):
     assert models_used(calls) == ["gpt-mini"]   # 链 test = [mini]
 
 
+def test_responses_profile_dispatches_and_extracts_json(chain_cfg, tmp_cwd, fake_llm):
+    from conftest import prompts_used
+
+    from core.utils import config_utils
+    from ruamel.yaml import YAML
+
+    config_path = config_utils.CONFIG_PATH
+    yaml = YAML()
+    with open(config_path, "r", encoding="utf-8") as stream:
+        config = yaml.load(stream)
+    config["llm"]["models"]["mini"]["api_type"] = "responses"
+    with open(config_path, "w", encoding="utf-8") as stream:
+        yaml.dump(config, stream)
+
+    response = {
+        "output": [{"content": [{"type": "output_text", "text": '{"answer":"ok"}'}]}]
+    }
+    calls, script = fake_llm([response])
+    assert ag.ask_gpt("prompt-responses", resp_type="json",
+                      log_title="translate_faith") == {"answer": "ok"}
+    assert models_used(calls) == ["gpt-mini"]
+    request = prompts_used(calls)[0]
+    assert request[0]["content"] == "prompt-responses"
+    assert request[0]["role"] == "user"
+    params = next(call[2] for call in calls if call[0] == "gpt-mini")
+    assert params["max_output_tokens"] == 4096
+    assert params["text"] == {"format": {"type": "json_object"}}
+    assert "messages" not in params and "max_tokens" not in params
+
+
 # -------------------------------------------------------------- 瞬时失败重试
 
 def test_transient_failure_exhausts_retries_then_walks_chain(
@@ -335,3 +365,53 @@ def test_classify_error_distinguishes_429():
     from core.services.llm_service import classify_error, RATE_LIMIT, TRANSIENT
     assert classify_error(status_error(429)) == RATE_LIMIT
     assert classify_error(status_error(500)) == TRANSIENT
+
+
+def test_response_validation_handles_empty_and_error_shapes():
+    from core.services.llm_service import check_response
+
+    assert check_response(None, api_type="responses")[0] is None
+    content, error = check_response(
+        {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+        api_type="responses")
+    assert content is None
+    assert "incomplete" in error or "max_output_tokens" in error
+
+    content, error = check_response({"error": {"message": "bad request"}},
+                                    api_type="responses")
+    assert content is None
+    assert "bad request" in error
+
+    assert check_response(None)[0] is None
+    content, error = check_response({"error": {"message": "bad request"}})
+    assert content is None
+    assert "bad request" in error
+
+
+def test_responses_probe_dispatches_and_checks_output(monkeypatch):
+    from core.services import llm_service
+    from conftest import FakeClient
+    from core.utils import net_policy
+
+    calls = []
+    client = FakeClient([{"output_text": " ok "}], calls)
+    monkeypatch.setattr(net_policy, "get_policy",
+                        lambda: ("direct", None, None))
+    monkeypatch.setattr(net_policy, "make_openai_client",
+                        lambda *args, **kwargs: client)
+
+    ok, result, status = llm_service.probe({
+        "base_url": "https://api.example.com/v1",
+        "model": "gpt-responses",
+        "api_type": "responses",
+        "thinking_type": "enabled",
+    }, "test-key")
+
+    assert ok is True
+    assert result["reply"] == "ok"
+    assert status is None
+    params = next(call[2] for call in calls if call[0] == "gpt-responses")
+    assert params["input"] == [{"role": "user", "content": "Reply with the single word: ok"}]
+    assert params["max_output_tokens"] == 32
+    assert params["reasoning"] == {"effort": "none"}
+    assert "messages" not in params and "max_tokens" not in params

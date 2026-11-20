@@ -188,9 +188,22 @@ class FakeCompletions:
         self.log = log          # 记录每次调用的 (key, model)
 
     def create(self, **params):
-        self.log.append((params.get("model"), params.get("messages")))
+        self.log.append((params.get("model"), params.get("messages"), params))
         if not self.script:
             raise AssertionError("FakeCompletions: 脚本已用尽（调用次数超出预期）")
+        item = self.script.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+class FakeResponses(FakeCompletions):
+    """Fake Responses endpoint; records its input using the shared call log."""
+
+    def create(self, **params):
+        self.log.append((params.get("model"), params.get("input"), params))
+        if not self.script:
+            raise AssertionError("FakeResponses: 脚本已用尽（调用次数超出预期）")
         item = self.script.pop(0)
         if isinstance(item, BaseException):
             raise item
@@ -202,6 +215,7 @@ class FakeClient:
 
     def __init__(self, script, log):
         self.chat = types.SimpleNamespace(completions=FakeCompletions(script, log))
+        self.responses = types.SimpleNamespace(create=FakeResponses(script, log).create)
 
 
 @pytest.fixture
@@ -234,7 +248,7 @@ def fake_llm(monkeypatch):
 #
 # `calls` 里混着两种记录，别在各测试文件里各写一份解包：
 #   ("__key__", api_key)      每次构造客户端时记一条（用于断言 key 轮换）
-#   (model, messages)         每次真实请求记一条（用于断言用了哪个模型）
+#   (model, messages/input, params) 每次真实请求记录请求体及参数（用于协议断言）
 # 曾经有人把 (model, messages) 解成 (tag, model)，断言直接变成比对 messages。
 
 def keys_used(calls):

@@ -135,24 +135,23 @@ def _call_once(profile, prompt, resp_type, valid_def, log_title,
     if resp_type == "json" and not profile["llm_support_json"]:
         effective_prompt = prompt + "\n\nIMPORTANT: Respond with a valid JSON object only. Do not wrap in markdown. Do not return a list."
 
-    params = dict(
-        model=model,
-        messages=[{"role": "user", "content": effective_prompt}],
-        response_format=response_format,
-        temperature=0.4,
-        timeout=300
-    )
-    if thinking_type:
-        params["extra_body"] = {
-            "thinking": {
-                "type": thinking_type
-            }
-        }
+    from core.services.llm_service import create_text_response
+
+    request_options = {
+        "max_tokens": 4096,
+        "temperature": 0.4,
+        "response_format": response_format,
+        "thinking_type": thinking_type,
+        "timeout": 300,
+    }
 
     def _request_with_mode(mode):
         client = net_policy.make_openai_client(
-            profile["key"], base_url, mode, timeout=params["timeout"])
-        return client.chat.completions.create(**params)
+            profile["key"], base_url, mode, timeout=request_options["timeout"])
+        return create_text_response(
+            client, profile.get("api_type", "chat_completions"), model,
+            [{"role": "user", "content": effective_prompt}],
+            **request_options)
 
     modes = net_policy.ordered_modes(base_url)
     # request log: what exactly is being called (user-requested visibility)
@@ -189,7 +188,8 @@ def _call_once(profile, prompt, resp_type, valid_def, log_title,
 
     # response sanity rules live in the service layer (single source)
     from core.services.llm_service import check_response
-    resp_content, err = check_response(resp_raw)
+    resp_content, err = check_response(
+        resp_raw, api_type=profile.get("api_type", "chat_completions"))
     if err:
         raise ValueError(f"❎ {err}")
 

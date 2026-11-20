@@ -108,3 +108,21 @@ def test_chain_referencing_unknown_model_is_rejected(client):
     r = _put(client, chains, TASKS)
     assert r.status_code == 400
     assert "ghost" in r.json()["detail"]
+
+
+def test_model_api_type_is_saved_and_returned(client):
+    r = client.put("/api/models/model", json={
+        "name": "mini", "endpoint": "epa", "model": "gpt-mini-responses",
+        "llm_support_json": True, "api_type": "responses",
+    })
+    assert r.status_code == 200, r.text
+    assert client.get("/api/models").json()["models"]["mini"]["api_type"] == "responses"
+
+
+def test_model_api_rejects_unknown_api_type(client):
+    r = client.put("/api/models/model", json={
+        "name": "mini", "endpoint": "epa", "model": "gpt-mini",
+        "api_type": "chat_completions_v2",
+    })
+    assert r.status_code == 400
+    assert "api_type" in r.json()["detail"]

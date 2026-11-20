@@ -23,6 +23,7 @@ interface Endpoint {
 interface ModelEntry {
   endpoint: string
   model: string
+  api_type?: 'chat_completions' | 'responses'
   llm_support_json?: boolean
   thinking_type?: string
   _has_key?: boolean
@@ -83,7 +84,7 @@ async function revealKeys(name: string): Promise<string[]> {
   return j.keys ?? []
 }
 
-async function upsertModel(p: { name: string; endpoint: string; model: string; llm_support_json: boolean; thinking_type?: string }): Promise<void> {
+async function upsertModel(p: { name: string; endpoint: string; model: string; api_type: 'chat_completions' | 'responses'; llm_support_json: boolean; thinking_type?: string }): Promise<void> {
   const r = await fetch('/api/models/model', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(p),
@@ -165,11 +166,12 @@ interface ModelEditState {
   isNew: boolean
   endpoint: string
   model: string
+  api_type: 'chat_completions' | 'responses'
   llm_support_json: boolean
   thinking_type: string
 }
 
-const EMPTY_MODEL: ModelEditState = { open: false, name: '', isNew: true, endpoint: '', model: '', llm_support_json: true, thinking_type: '' }
+const EMPTY_MODEL: ModelEditState = { open: false, name: '', isNew: true, endpoint: '', model: '', api_type: 'chat_completions', llm_support_json: true, thinking_type: '' }
 
 // ---------------- page ----------------
 
@@ -354,6 +356,7 @@ export default function ModelsPage() {
   const saveModel = () => act(async () => {
     await upsertModel({
       name: modelEdit.name, endpoint: modelEdit.endpoint, model: modelEdit.model,
+      api_type: modelEdit.api_type,
       llm_support_json: modelEdit.llm_support_json,
       thinking_type: modelEdit.thinking_type || undefined,
     })
@@ -510,6 +513,7 @@ export default function ModelsPage() {
                     onClick={() => { setModelOptions([]); setModelEdit({
                       open: true, name, isNew: false,
                       endpoint: m.endpoint, model: m.model,
+                      api_type: m.api_type ?? 'chat_completions',
                       llm_support_json: m.llm_support_json !== false,
                       thinking_type: m.thinking_type ?? '',
                     }) }}>
@@ -851,6 +855,15 @@ export default function ModelsPage() {
               onChange={(v) => setModelEdit({ ...modelEdit, model: v })}
               placeholder="点「获取模型列表」或手填，如 glm-5.3-flash"
             />
+          </div>
+          <div>
+            <Typography.Text strong>API 协议</Typography.Text>
+            <Select style={{ width: '100%' }} value={modelEdit.api_type}
+              options={[
+                { value: 'chat_completions', label: 'Chat Completions' },
+                { value: 'responses', label: 'Responses API' },
+              ]}
+              onChange={(v: 'chat_completions' | 'responses') => setModelEdit({ ...modelEdit, api_type: v })} />
           </div>
           <Space>
             <Typography.Text style={{ fontSize: 13 }}>支持 JSON 输出</Typography.Text>

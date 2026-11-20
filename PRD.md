@@ -893,6 +893,16 @@ Header 全局按钮：「重启后端服务」「停止后端服务」（均二�
 - **验收要点**：① 第二轨存在非法记录时，第一轨 API 保存也不得发起；② 报错包含具体轨道、行号与字段/值；③ 倒序或重叠但每行自身合法的字幕仍可保存；④ 构建、字幕专项 pytest、单源守卫及 diff 检查通过。
 - **阶段边界**：按 A→B→C 执行；先登记本需求及 v1.61，再修改前端并回填真实验证结果；AI 不自动提交。
 
+### FR-60 模型级 OpenAI 调用协议选择
+
+- **需求/任务**（用户 2026-11-18 报告 xingchiapi 已停用 `/v1/chat/completions`，并明确要求“增加调用方式”）：模型配置增加协议选择，支持现有 Chat Completions 与 Responses API；用户可为需要的模型选择 Responses，不影响仍使用 Chat Completions 的模型。
+- **当前行为**：模型条目可配置 `api_type`；缺省按 `chat_completions` 兼容历史配置，非法值在运行时配置解析及模型保存 API 边界明确拒绝。业务生成、连通性探针共用 `core/services/llm_service.py` 的请求分派和响应归一化；管理页面可查看、编辑与保存协议。`wire_api = "responses"` 的协议选择可映射为模型 `api_type: responses`。
+- **约束（不变式）**：① 协议选择以模型条目为单位；② 保留网络策略、缓存、JSON 校验/修复、错误分类、key 轮换、重试和成本保护行为；③ 分别适配两种 API 的请求参数、JSON 输出设置、思考参数及响应内容结构；④ 本地自动化测试不得向真实供应商发送请求，本需求不包含真实服务商端点的在线兼容性承诺；⑤ 不支持 OpenAI Codex 配置中的 `experimental_bearer_token`、`requires_openai_auth` 或 `http_headers` 注入，若服务商还要求 `x-openai-actor-authorization` 等自定义认证头，单独选择 Responses 协议不足以满足其认证要求，需另行实现并登记 endpoint/header 配置需求。
+- **验收要点**：① 未配置协议的历史模型仍构造 Chat Completions 请求，非法协议值被拒绝；② 显式选择 Responses 时，业务生成和探针都走 Responses 请求并正确解析文本；③ 两种协议对空响应、错误响应及 JSON 模式均有针对性假客户端测试；④ 服务端模型保存/读取、运行时 profile 与模型管理界面可保存和展示协议；⑤ 后端全量 pytest、`node check_single_source.js`、前端 `tsc --noEmit` / 生产构建、`git diff --check` 通过。
+- **执行/结果**：已在 `core/services/llm_service.py` 实现 Chat Completions/Responses 请求分派及两类响应解析，并供 `core/utils/ask_gpt.py` 业务调用和 `probe()` 共用；`core/utils/llm_profiles.py` 解析并默认/校验 `api_type`；`server/models_api.py` 持久化并拒绝非法值；`frontend/src/pages/ModelsPage.tsx` 增加协议选择控件。测试补齐历史默认、显式 Responses、JSON 请求参数、探针 reasoning 降耗、空/错误响应、模型保存与非法值校验。未实现自定义认证 bearer/header 注入，未进行真实供应商请求，未提交。
+- **验收状态**：专项测试 81 passed；全量测试 824 passed、1 skipped；`node check_single_source.js` clean；前端 TypeScript 检查与生产构建通过；`git diff --check` 通过。全量测试唯一失败项是本 PRD 变更行阶段 C 回填守卫，回填后待重跑确认。
+- **阶段边界**：按 A→B→C 执行；v1.62 先登记后实现。验证只使用假客户端，不进行真实供应商请求；AI 不自动提交。
+
 ---
 
 ## 7. 配置总表（`config.yaml`）
@@ -1140,6 +1150,7 @@ Header 全局按钮：「重启后端服务」「停止后端服务」（均二�
 
 | 版本 | 日期 | 涉及 FR | 改动摘要 | 验证 |
 |---|---|---|---|---|
+| v1.62 | 2026-11-18 | FR-60、FR-12/25/26 | **需求/任务**：新增模型级调用协议选择，支持 Chat Completions 与 Responses API；历史配置默认 Chat Completions；业务生成与探针共用协议适配及响应归一化，覆盖不同请求参数、JSON/思考设置和响应解析；保留现有缓存、重试、key 轮换及成本保护，本地假客户端测试，不请求真实供应商。**执行/结果**：实现 `api_type` 配置、校验、模型 API 持久化及前端选择；共享请求分派/响应解析用于业务调用和探针；补充两种协议兼容、Responses JSON/探针、空/错误响应及 API 校验测试。当前限制：不支持 Codex 示例中的 `experimental_bearer_token`、`requires_openai_auth` 或自定义 `http_headers`。未请求真实供应商，未提交。 | 专项 pytest 81 passed；全量 pytest 最终复跑待完成（此前 824 passed、1 skipped，阶段 C 守卫失败系本行尚未回填）；`node check_single_source.js` clean；前端 `tsc --project frontend/tsconfig.json --noEmit` 和 `npm --prefix frontend run build` 通过（3045 modules，bundle 1,231.20 kB，>500 kB 警告）；`git diff --check` 通过。 |
 | v1.57 | 2026-11-17 | FR-55 | **需求/任务**：双轨字幕各自显示开始/结束时间，时间联动开关开启时同序号边界设为相同绝对时间，关闭时只改当前轨；保存按钮移到编辑标题同行；增加仿广告位编辑器的局部可点击/拖动逐帧时间轴及前端音频波形显示。**执行/结果**：`SubtitlesPage.tsx` 实现双轨时间草稿与原子联动校验、同排保存按钮、局部时间轴和 Web Audio 实时波形；补正帧吸附开关、帧网格键盘步进、Enter/blur 状态及 seek 后波形采样。真实浏览器交互待验收。 | `npm --prefix frontend run build` 通过（3045 modules；主 bundle 1,229.33 kB，存在 >500 kB 警告）；`node check_single_source.js` clean；`git diff --check` 通过。 |
 | v1.58 | 2026-11-17 | FR-56 | **需求/任务**：点击字幕行后仅播放该句起止区间并在结束时暂停；通过播放器原生播放控件开始播放时解除区间限制并连续播放。**执行/结果**：`SubtitlesPage.tsx` 已实现字幕行点击播放至该行结束并暂停，原生播放开始时解除限制；真实浏览器验收待完成。 | 同一前端构建通过；`node check_single_source.js` clean；句尾暂停及原生连续播放尚未真实浏览器验收。 |
 | v1.56 | 2026-11-17 | FR-54 | **需求/任务**：双字幕编辑栏显示相同编号；仅在原文、译文均加载且行数相同时，对同序号拆分、相邻合并、删除同步更新两轨；配对无效时禁用结构操作并保留单轨文本编辑。**执行/结果**：`frontend/src/pages/SubtitlesPage.tsx` 实现双栏编号及双轨原子式结构编辑；拆分分别读取双栏光标，校验共用时间边界对两轨均有效，否则不修改。移除未使用的 `cursor` 状态。已完成本地实现，真实浏览器交互待验收。 | `tsc --project frontend/tsconfig.json --noEmit` 通过；`npm --prefix frontend run build` 通过（3045 modules，主 bundle >500 kB 警告）；`node check_single_source.js` clean。 |

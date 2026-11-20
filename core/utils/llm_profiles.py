@@ -193,10 +193,15 @@ def _resolve_models(llm: dict, endpoints: dict) -> dict:
         ep = raw.get("endpoint")
         if ep not in endpoints:
             continue  # dangling reference — skip; chain validation reports it
+        api_type = raw.get("api_type", "chat_completions")
+        if api_type not in ("chat_completions", "responses"):
+            raise ValueError(
+                f"llm.models.{name}.api_type must be 'chat_completions' or 'responses'")
         models[name] = {
             "name": name,
             "endpoint": ep,
             "model": raw.get("model", ""),
+            "api_type": api_type,
             "llm_support_json": bool(raw.get("llm_support_json", False)),
             "thinking_type": raw.get("thinking_type") or None,
         }
@@ -316,6 +321,7 @@ def _as_profile(name, model_entry, endpoints):
         "keys": keys,           # full pool for rotation in ask_gpt
         "base_url": ep["base_url"],
         "model": model_entry["model"],
+        "api_type": model_entry["api_type"],
         "llm_support_json": model_entry["llm_support_json"],
         "thinking_type": model_entry["thinking_type"],
     }

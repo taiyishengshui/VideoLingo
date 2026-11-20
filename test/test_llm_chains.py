@@ -149,6 +149,7 @@ def test_profile_shape_carries_endpoint_fields(chain_cfg):
     cfg = lp.load_llm_config()
     mini = cfg["profiles"]["mini"]
     assert mini["name"] == "mini"
+    assert mini["api_type"] == "chat_completions"
     assert mini["endpoint"] == "epa"
     assert mini["model"] == "gpt-mini"
     assert mini["base_url"] == "https://api.a.com/v1"
@@ -157,6 +158,41 @@ def test_profile_shape_carries_endpoint_fields(chain_cfg):
     assert mini["keys"] == ["sk-aaa111111111", "sk-aaa222222222"]
     assert mini["llm_support_json"] is True
     assert mini["thinking_type"] == "disabled"
+
+
+def test_model_profile_accepts_responses_and_rejects_unknown_api_type(cfg_path):
+    cfg_path("""
+llm:
+  endpoints:
+    ep:
+      base_url: 'https://api.example.com/v1'
+      key: 'sk-test'
+  models:
+    m:
+      endpoint: ep
+      model: m1
+      api_type: responses
+  tasks:
+    default: [m]
+""")
+    assert lp.load_llm_config()["profiles"]["m"]["api_type"] == "responses"
+
+    cfg_path("""
+llm:
+  endpoints:
+    ep:
+      base_url: 'https://api.example.com/v1'
+      key: 'sk-test'
+  models:
+    m:
+      endpoint: ep
+      model: m1
+      api_type: invalid
+  tasks:
+    default: [m]
+""")
+    with pytest.raises(ValueError, match="api_type"):
+        lp.load_llm_config()
 
 
 def test_model_with_dangling_endpoint_is_dropped(cfg_path):

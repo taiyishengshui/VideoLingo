@@ -228,6 +228,7 @@ class ModelUpsert(BaseModel):
     model: str
     llm_support_json: bool = True
     thinking_type: str | None = None
+    api_type: str = "chat_completions"
 
 
 @router.put("/model")
@@ -241,8 +242,11 @@ def upsert_model(req: ModelUpsert):
         raise HTTPException(404, f"endpoint 不存在: {req.endpoint}（先在平台凭证卡创建）")
     if not req.model:
         raise HTTPException(400, "model 不能为空")
+    if req.api_type not in ("chat_completions", "responses"):
+        raise HTTPException(400, "api_type 须为 chat_completions 或 responses")
     entry = {"endpoint": req.endpoint, "model": req.model.strip(),
-             "llm_support_json": req.llm_support_json}
+             "llm_support_json": req.llm_support_json,
+             "api_type": req.api_type}
     if req.thinking_type:
         entry["thinking_type"] = req.thinking_type
     llm.setdefault("models", {})[req.name] = entry

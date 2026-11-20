@@ -149,16 +149,33 @@ def on_failure(endpoint: str, key: str, exc: Exception,
 
 # --- response sanity checks (shared by every entry) ------------------------
 
-def check_response(resp) -> tuple:
-    """Validate a ChatCompletion-shaped response.
+def _response_dict(resp):
+    if hasattr(resp, "model_dump"):
+        return resp.model_dump()
+    if isinstance(resp, dict):
+        return resp
+    return dict(resp) if hasattr(resp, "__dict__") else {}
 
-    Returns (content, None) on success or (None, error_message) on failure.
-    Handles: SDK objects, dicts, bare strings (an HTML page means the
-    base_url lacks /v1 and we hit the site's frontend), missing choices,
-    and empty content. ask_gpt and test_llm both go through here — the
-    sanity rules are identical everywhere by construction."""
+
+def _responses_text(resp_dict):
+    text = resp_dict.get("output_text")
+    if isinstance(text, str) and text:
+        return text
+    parts = []
+    for item in resp_dict.get("output") or []:
+        item = item if isinstance(item, dict) else {}
+        for content in item.get("content") or []:
+            content = content if isinstance(content, dict) else {}
+            if content.get("type") in ("output_text", "text"):
+                value = content.get("text")
+                if isinstance(value, str):
+                    parts.append(value)
+    return "".join(parts)
+
+
+def check_response(resp, api_type="chat_completions") -> tuple:
+    """Validate a Chat Completions or Responses API response."""
     if isinstance(resp, str):
-        # A 200 whose body isn't a ChatCompletion. Most often an HTML page.
         snippet = resp[:120].lstrip().lower()
         if snippet.startswith("<!doctype") or snippet.startswith("<html"):
             return None, ("已连通但返回的是网页(HTML)——base_url 疑似缺少 /v1 后缀，"
@@ -167,18 +184,19 @@ def check_response(resp) -> tuple:
     if resp is None:
         return None, "API returned an empty response (None)"
 
-    if hasattr(resp, "model_dump"):
-        resp_dict = resp.model_dump()
-    elif isinstance(resp, dict):
-        resp_dict = resp
-    else:
-        resp_dict = dict(resp) if hasattr(resp, "__dict__") else {}
+    resp_dict = _response_dict(resp)
+    if api_type == "responses":
+        content = _responses_text(resp_dict)
+        if not content:
+            status = resp_dict.get("status", "unknown")
+            detail = resp_dict.get("error") or resp_dict.get("incomplete_details") or status
+            return None, f"API returned empty Responses output (status={detail})"
+        return content, None
 
     choices = resp_dict.get("choices")
-    if not choices or not isinstance(choices, list) or len(choices) == 0:
+    if not choices or not isinstance(choices, list):
         error_detail = resp_dict.get("error", resp_dict.get("message", "unknown"))
         return None, f"API response has no valid choices: {error_detail}"
-
     first_choice = choices[0]
     if isinstance(first_choice, dict):
         message = first_choice.get("message", {})
@@ -188,10 +206,36 @@ def check_response(resp) -> tuple:
         message = getattr(first_choice, "message", None)
         resp_content = getattr(message, "content", None) if message else None
         finish_reason = getattr(first_choice, "finish_reason", "unknown")
-
     if resp_content is None:
         return None, f"API returned empty content (finish_reason={finish_reason})"
     return resp_content, None
+
+
+def create_text_response(client, api_type, model, prompt, *, max_tokens,
+                         temperature=None, response_format=None, thinking_type=None,
+                         timeout=None):
+    """Dispatch a text request using the selected OpenAI-compatible protocol."""
+    if api_type == "responses":
+        params = {"model": model, "input": prompt, "max_output_tokens": max_tokens}
+        if temperature is not None:
+            params["temperature"] = temperature
+        if response_format:
+            params["text"] = {"format": {"type": "json_object"}}
+        if thinking_type in ("enabled", "disabled"):
+            params["reasoning"] = {
+                "effort": "high" if thinking_type == "enabled" else "none"}
+        if timeout is not None:
+            params["timeout"] = timeout
+        return client.responses.create(**params)
+
+    params = {"model": model, "messages": prompt, "max_tokens": max_tokens,
+              "response_format": response_format, "extra_body": (
+                  {"thinking": {"type": thinking_type}} if thinking_type else None)}
+    if temperature is not None:
+        params["temperature"] = temperature
+    if timeout is not None:
+        params["timeout"] = timeout
+    return client.chat.completions.create(**params)
 
 
 def probe(profile: dict, key: str, timeout: int = 15) -> tuple:
@@ -218,20 +262,18 @@ def probe(profile: dict, key: str, timeout: int = 15) -> tuple:
         clients["proxy"] = net_policy.make_openai_client(
             key, base_url, "proxy", timeout)
 
-    prompt = [{"role": "user", "content": "Reply with the single word: ok"}]
-    # probe override: a probe is a cheap connectivity check — NEVER let the
-    # model think (glm-5.3 once burned 200k thinking tokens on this prompt,
-    # $0.34 for a "test" click). Disabled is safe even for non-thinking
-    # providers when the profile itself advertises thinking_type.
-    extra = ({"thinking": {"type": "disabled"}}
-             if profile.get("thinking_type") else None)
+    prompt = "Reply with the single word: ok"
+    api_type = profile.get("api_type", "chat_completions")
+    # Connectivity probes must stay cheap; never enable reasoning here.
+    probe_thinking = "disabled" if profile.get("thinking_type") else None
     last_err, status = "", None
     for label, client in clients.items():
         try:
-            resp = client.chat.completions.create(
-                model=profile["model"], messages=prompt, max_tokens=32,
-                extra_body=extra)
-            content, err = check_response(resp)
+            resp = create_text_response(
+                client, api_type, profile["model"],
+                [{"role": "user", "content": prompt}], max_tokens=32,
+                thinking_type=probe_thinking, timeout=timeout)
+            content, err = check_response(resp, api_type=api_type)
             if err:
                 return False, {"error": err, "via": label}, None
             return True, {"reply": (content or "").strip()[:50], "via": label,
