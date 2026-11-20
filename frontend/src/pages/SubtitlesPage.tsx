@@ -5,8 +5,8 @@ import {
 } from 'antd'
 import { batchStatus } from '../batchApi'
 import {
-  SubtitleContext, SubtitleRow, SubtitleScope, SubtitleTrack,
-  SubtitleTrackName, getSubtitleContext, saveSubtitleTrack,
+  AdSegment, SubtitleContext, SubtitleRow, SubtitleScope, SubtitleTrack,
+  SubtitleTrackName, getAdContext, getSubtitleContext, saveSubtitleTrack,
 } from '../api'
 
 const TRACK_LABEL: Record<SubtitleTrackName, string> = {
@@ -144,6 +144,9 @@ export default function SubtitlesPage() {
   const [batchVideos, setBatchVideos] = useState<string[]>([])
   const [video, setVideo] = useState<string>('')
   const [context, setContext] = useState<SubtitleContext | null>(null)
+  const [adSegments, setAdSegments] = useState<AdSegment[]>([])
+  const [adContextError, setAdContextError] = useState('')
+  const [selectedAdId, setSelectedAdId] = useState<number | null>(null)
   const [trackName, setTrackName] = useState<SubtitleTrackName>('src.srt')
   const [tracks, setTracks] = useState<Record<SubtitleTrackName, SubtitleTrack | null>>({
     'src.srt': null, 'trans.srt': null,
@@ -232,6 +235,27 @@ export default function SubtitlesPage() {
       const chosen = scope === 'batch' ? (video || candidates[0]) : undefined
       const data = await getSubtitleContext(scope, chosen)
       setContext(data)
+      if (scope === 'single') {
+        try {
+          const adContext = await getAdContext()
+          const segments = adContext.edl?.segments ?? []
+          const validSegments = segments
+            .filter((segment) => segment.enabled && Number.isFinite(segment.start) && Number.isFinite(segment.end)
+              && segment.start >= 0 && segment.end > segment.start && segment.end <= data.duration + 0.05)
+            .sort((a, b) => a.start - b.start)
+          setAdSegments(validSegments)
+          setSelectedAdId(validSegments[0]?.id ?? null)
+          setAdContextError('')
+        } catch {
+          setAdSegments([])
+          setSelectedAdId(null)
+          setAdContextError('广告时间暂不可用；可在广告位页面确认 EDL 已生成后刷新')
+        }
+      } else {
+        setAdSegments([])
+        setSelectedAdId(null)
+        setAdContextError('批量扫描工作区不使用单任务广告时间')
+      }
       setWaveform([])
       setWaveformError('播放时采集音频波形')
       singlePlayRef.current = null
@@ -290,6 +314,12 @@ export default function SubtitlesPage() {
     lastWaveformSampleRef.current = null
     if (videoRef.current) videoRef.current.currentTime = time
     setPlayhead(time)
+  }
+
+  const selectedAdSegment = adSegments.find((segment) => segment.id === selectedAdId) ?? null
+  const seekToAdBoundary = (which: 'start' | 'end') => {
+    if (!selectedAdSegment || scope !== 'single') return
+    seekTo(selectedAdSegment[which])
   }
 
   const editTrackText = (name: SubtitleTrackName, value: string) => {
@@ -744,6 +774,26 @@ export default function SubtitlesPage() {
               waveform={waveform} waveformError={waveformError} onSeek={seekTo} />
             <Space style={{ marginTop: 8 }} wrap>
               <Tag color="blue">播放头 {clock(playhead)} · 第 {Math.round(playhead * fps)} 帧</Tag>
+              {scope === 'single' ? (
+                <>
+                  <Select aria-label="广告段" value={selectedAdId ?? undefined}
+                    placeholder={adContextError ? '广告时间不可用' : '无有效广告段'}
+                    disabled={adSegments.length === 0}
+                    onChange={(value) => {
+                      setSelectedAdId(value)
+                      const segment = adSegments.find((item) => item.id === value)
+                      if (segment && scope === 'single') seekTo(segment.start)
+                    }}
+                    options={adSegments.map((segment) => ({
+                      value: segment.id,
+                      label: `${segment.brand || segment.note || `广告段 ${segment.id}`} · ${clock(segment.start)}–${clock(segment.end)}`,
+                    }))}
+                    style={{ width: 320, maxWidth: '100%' }} />
+                  <Button size="small" disabled={!selectedAdSegment} onClick={() => seekToAdBoundary('start')}>跳到广告开始</Button>
+                  <Button size="small" disabled={!selectedAdSegment} onClick={() => seekToAdBoundary('end')}>跳到广告结束</Button>
+                  {adSegments.length === 0 && <Typography.Text type="secondary">{adContextError || '当前 EDL 没有启用且时间有效的广告段'}</Typography.Text>}
+                </>
+              ) : <Typography.Text type="secondary">{adContextError}</Typography.Text>}
               <Select aria-label="帧率" value={fps} onChange={(value) => setManualFps(value)}
                 options={[23.976, 24, 25, 29.97, 30, 50, 59.94, 60].map((value) => ({
                   value, label: `${value} fps${value === context?.fps && context?.fps_source === 'auto' ? '（实测）' : ''}`,
