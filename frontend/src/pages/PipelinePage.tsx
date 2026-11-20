@@ -60,6 +60,8 @@ import {
   StepStatus,
   StepTiming,
   TimingsReport,
+  SubtitleRow,
+  SubtitleTrackName,
   adPreviewUrl,
   clearInput,
   control,
@@ -72,6 +74,7 @@ import {
   getCookieStatus,
   getInput,
   getPipeline,
+  getSubtitleContext,
   getTimings,
   generateBiliMeta,
   releasePreviewStreams,
@@ -591,6 +594,18 @@ export default function PipelinePage() {
   const [adMedia, setAdMedia] = useState<AdMediaInfo | null>(null)
   const [adSnap, setAdSnap] = useState(true)
   const [adPlaying, setAdPlaying] = useState(false)
+  const [previewSubtitles, setPreviewSubtitles] = useState<Record<SubtitleTrackName, SubtitleRow[] | null>>({
+    'src.srt': null,
+    'trans.srt': null,
+  })
+  const [previewSubtitleVisible, setPreviewSubtitleVisible] = useState<Record<SubtitleTrackName, boolean>>({
+    'src.srt': true,
+    'trans.srt': true,
+  })
+  const [previewSubtitleBusy, setPreviewSubtitleBusy] = useState<Record<SubtitleTrackName, boolean>>({
+    'src.srt': false,
+    'trans.srt': false,
+  })
   const [adActiveId, setAdActiveId] = useState<number | null>(null)
   const [adActiveWhich, setAdActiveWhich] = useState<'start' | 'end'>('start')
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -655,6 +670,7 @@ export default function PipelinePage() {
     }
     videoRef.current?.pause()
     setAdPlaying(false)
+    setPreviewSubtitles({ 'src.srt': null, 'trans.srt': null })
     adSourceKeyRef.current = key
     setAdSource(id)
   }, [])
@@ -757,6 +773,28 @@ export default function PipelinePage() {
     const v = videoRef.current
     seekExact((v ? v.currentTime : adPlayhead) + delta)
   }
+  const loadPreviewSubtitle = async (name: SubtitleTrackName) => {
+    const sourceKey = adSourceKeyRef.current
+    setPreviewSubtitleBusy((old) => ({ ...old, [name]: true }))
+    try {
+      const context = await getSubtitleContext('single')
+      if (sourceKey !== adSourceKeyRef.current) return
+      const track = context.tracks[name]
+      if (!track?.rows.length) {
+        setPreviewSubtitles((old) => ({ ...old, [name]: null }))
+        msgApi.warning(track ? `${name} 没有字幕行` : `当前工作区没有 ${name}`)
+        return
+      }
+      setPreviewSubtitles((old) => ({ ...old, [name]: track.rows }))
+      setPreviewSubtitleVisible((old) => ({ ...old, [name]: true }))
+      msgApi.success(`已加载 ${name} · ${track.rows.length} 行`)
+    } catch (error) {
+      msgApi.error(error instanceof Error ? error.message : `加载 ${name} 失败`)
+    } finally {
+      setPreviewSubtitleBusy((old) => ({ ...old, [name]: false }))
+    }
+  }
+
   const togglePlay = () => {
     const v = videoRef.current
     if (!v) return
@@ -1388,26 +1426,66 @@ export default function PipelinePage() {
           </Space>
 
           {adVideoReady && (
-            <video ref={videoRef} controls preload="metadata"
-              onPlay={() => setAdPlaying(true)}
-              onPause={() => setAdPlaying(false)}
-              onLoadedMetadata={(e) => {
-                const t = pendingSeekRef.current ?? adPlayheadRef.current
-                const d = e.currentTarget.duration
-                const target = Number.isFinite(d) ? Math.min(t, Math.max(0, d - 0.05)) : t
-                if (target > 0) e.currentTarget.currentTime = target
-                setAdPlayhead(target)
-                pendingSeekRef.current = null
-              }}
-              onTimeUpdate={(e) => setAdPlayhead(e.currentTarget.currentTime)}
-              onSeeked={(e) => {
-                const t = e.currentTarget.currentTime
-                setAdPlayhead(t)
-                // 用原生进度条跳到远处时，局部窗口自动跟过去（剪映式跟随）
-                if (Math.abs(t - adAnchor) > adZoom) setAdAnchor(t)
-              }}
-              style={{ width: '100%', maxHeight: 340, background: '#000', borderRadius: 6 }}
-              src={adPreviewUrl(adSource, adSourceVersion)} />
+            <Space direction="vertical" size={6} style={{ width: '100%' }}>
+              <Space wrap size={8}>
+                {(['src.srt', 'trans.srt'] as const).map((name) => (
+                  <Space key={name} size={4}>
+                    <Button size="small" icon={<FileTextOutlined />}
+                      loading={previewSubtitleBusy[name]}
+                      onClick={() => void loadPreviewSubtitle(name)}>
+                      加载{name === 'src.srt' ? '原文' : '译文'}字幕
+                    </Button>
+                    {previewSubtitles[name] && (
+                      <Switch size="small" checked={previewSubtitleVisible[name]}
+                        aria-label={`显示 ${name}`}
+                        onChange={(checked) => setPreviewSubtitleVisible((old) => ({ ...old, [name]: checked }))} />
+                    )}
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {previewSubtitles[name]
+                        ? `${previewSubtitles[name]?.length ?? 0} 行已加载`
+                        : '未加载'}
+                    </Typography.Text>
+                  </Space>
+                ))}
+              </Space>
+              <div style={{ position: 'relative', width: '100%', lineHeight: 0 }}>
+                <video ref={videoRef} controls preload="metadata"
+                  onPlay={() => setAdPlaying(true)}
+                  onPause={() => setAdPlaying(false)}
+                  onLoadedMetadata={(e) => {
+                    const t = pendingSeekRef.current ?? adPlayheadRef.current
+                    const d = e.currentTarget.duration
+                    const target = Number.isFinite(d) ? Math.min(t, Math.max(0, d - 0.05)) : t
+                    if (target > 0) e.currentTarget.currentTime = target
+                    setAdPlayhead(target)
+                    pendingSeekRef.current = null
+                  }}
+                  onTimeUpdate={(e) => setAdPlayhead(e.currentTarget.currentTime)}
+                  onSeeked={(e) => {
+                    const t = e.currentTarget.currentTime
+                    setAdPlayhead(t)
+                    if (Math.abs(t - adAnchor) > adZoom) setAdAnchor(t)
+                  }}
+                  style={{ width: '100%', maxHeight: 340, background: '#000', borderRadius: 6 }}
+                  src={adPreviewUrl(adSource, adSourceVersion)} />
+                {(Object.keys(previewSubtitles) as SubtitleTrackName[]).flatMap((name) => {
+                  if (!previewSubtitleVisible[name]) return []
+                  const row = previewSubtitles[name]?.find((item) => item.start <= adPlayhead && item.end >= adPlayhead)
+                  if (!row) return []
+                  return [(
+                    <div key={name} style={{
+                      position: 'absolute', left: '5%', right: '5%',
+                      bottom: name === 'trans.srt' ? 42 : 70,
+                      color: name === 'trans.srt' ? '#fff' : '#fadb14',
+                      fontSize: 18, fontWeight: 600, lineHeight: 1.35,
+                      textAlign: 'center', whiteSpace: 'pre-wrap',
+                      textShadow: '0 1px 3px #000, 1px 0 3px #000, -1px 0 3px #000',
+                      pointerEvents: 'none',
+                    }}>{row.text}</div>
+                  )]
+                })}
+              </div>
+            </Space>
           )}
           {!adVideoReady && (
             <Alert type="info" showIcon
